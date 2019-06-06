@@ -1,0 +1,45 @@
+// Used to communicate between master daemon and worker executors
+
+syntax = "proto3";
+
+// The namepace for internal communications
+package infaas.internal;
+
+import "infaas_request_status.proto";
+
+// Service for the master to communicate with the workers
+service SysStatus {
+  // Scale up
+  rpc ScaleUpModel(ScaleRequest) returns (ScaleResponse) {}
+
+  // Scale down
+  rpc ScaleDownModel(ScaleRequest) returns (ScaleResponse) {}
+
+  // Migrate model to different hardware, and shut down all
+  // currently-running versions of the model on the worker
+  rpc MigrateModel(CreateMigrateRequest) returns (CreateMigrateResponse) {}
+
+  // Create instance on specified hardware without shutting down
+  // any possibly existing versions of the model on the worker
+  rpc CreateModel(CreateMigrateRequest) returns (CreateMigrateResponse) {}
+}
+
+message ScaleRequest {
+  string model = 1;
+  int32 numreplicas = 2; // How many replicas to scale up/down by
+}
+
+message ScaleResponse {
+  InfaasRequestStatus status = 1;
+}
+
+message CreateMigrateRequest {
+  string model = 1;
+  string hardware = 2;
+  int32 numreplicas = 3; // How many initial replicas to create on the hardware
+}
+
+message CreateMigrateResponse {
+  InfaasRequestStatus status = 1;
+}
+

@@ -1,0 +1,9 @@
+FROM pytorch/pytorch:1.0-cuda10.0-cudnn7-runtime
+
+LABEL name="INFaaS PyTorch" \
+      description="PyTorch Container for INFaaS"
+
+RUN python -m pip install grpcio protobuf
+
+COPY src/containers/pytorch_container.py src/containers/container_start.sh /workspace/
+COPY protos/internal/*.py /workspace/

@@ -1,0 +1,46 @@
+// Public API for users to register models with INFaaS
+
+syntax = "proto3";
+
+package infaaspublic.infaasmodelreg;
+
+import "request_reply.proto";
+
+// Defining the model registration service
+service ModelReg {
+  // Heartbeat
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse) {}
+
+  // Register a model
+  rpc RegisterModel(ModelRegRequest) returns (ModelRegResponse) {}
+}
+
+// Model registration request
+message ModelRegRequest {
+  string submitter = 1;
+  string grandparent_model = 2;
+  string parent_model = 3;
+  string first_variant = 4;
+  string url = 5;
+  string dataset = 6;
+  float accuracy = 7;
+  string framework = 8;
+  string task = 9;  // Tasks are image classification, translation, etc.
+  string config_name = 10; // Used if submitter == "tester".
+}
+
+// Model registration response
+message ModelRegResponse {
+  RequestReply status = 1;
+}
+
+// Heartbeat request
+message HeartbeatRequest {
+  RequestReply status = 1;
+}
+
+// Heartbeat response
+message HeartbeatResponse {
+  RequestReply status = 1;
+}
+

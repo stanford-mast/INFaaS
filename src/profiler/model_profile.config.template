@@ -1,0 +1,16 @@
+parname <PARNAME>
+varname <VARNAME>
+filename <FILENAME>
+dataset <DATASET>
+task <TASK>
+framework <FRAMEWORK>
+inputdim <INPUTDIM>
+maxbatch <MAXBATCH>
+loadlat <LOADLAT>
+inflatb1 <INFLATB1>
+inflatb4 <INFLATB4>
+inflatb8 <INFLATB8>
+accuracy <ACCURACY>
+compsize <COMPSIZE>
+peakmemory <PEAKMEMORY>
+

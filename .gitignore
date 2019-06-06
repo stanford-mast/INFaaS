@@ -1,0 +1,8 @@
+**/build*/
+*.swp
+*appendonly.aof
+*.pyc
+*.pem
+*.log
+*.DS_Store
+*constants.h

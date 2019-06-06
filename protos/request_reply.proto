@@ -1,0 +1,33 @@
+// Message definition of gRPC request status.
+
+syntax = "proto3";
+
+package infaaspublic;
+
+// Request status enums
+enum RequestReplyEnum {
+  INVALID = 0;
+  SUCCESS = 1;
+  UNAVAILABLE = 2;
+}
+
+// Request status message
+message RequestReply {
+  RequestReplyEnum status = 1;
+  string msg = 2;  // Additional message.
+}
+
+// AllParentInfo reply message
+message AllParReply {
+  repeated string all_models = 1;
+  RequestReply status = 2;
+}
+
+// QueryModelInfo reply message
+message QueryModelReply {
+  int32 img_dim = 1;
+  float accuracy = 2;
+  repeated string all_models = 3;
+  RequestReply status = 4;
+}
+
