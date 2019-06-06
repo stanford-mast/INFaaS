@@ -30,7 +30,7 @@ INFaaS will need access to this bucket when registering a model.
 ### General Setup
 1. Create an [AWS EC2](https://aws.amazon.com/ec2/) instance, which will serve as the master node.
 In our experiments, we use an `m5.2xlarge` instance.
-We provide and recommend using our a public AMI(ami-0e78494a87c4df251) that pre-installs the dependencies.
+We provide a public AMI(ami-0e78494a87c4df251) in *us-west-2* (that you can [copy to your region](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/CopyingAMIs.html)) that contains the pre-installed dependencies.
 The instance should have the IAM Role and Security Group you created in the [**One-time Setup**](https://github.com/stanford-mast/INFaaS#one-time-setup) attached to it.
 2. If you don't use our AMI (which already has INFaaS's directory set up), clone the INFaaS repository: `git clone https://github.com/stanford-mast/INFaaS.git`.
 3. Open `start_infaas.sh` and fill in the following entries:
