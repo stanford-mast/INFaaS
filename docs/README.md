@@ -1,5 +1,3 @@
-<img src="https://infaas-logo.s3-us-west-2.amazonaws.com/infaas_logo.png" width="200">
-
 INFaaS is an inference-as-a-service platform that makes inference accessible and easy-to-use by abstracting resource management and model selection.
 Users simply specify their inference task along with any performance and accuracy requirements for queries.
 
