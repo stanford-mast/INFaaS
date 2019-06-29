@@ -34,23 +34,27 @@ We provide a public AMI(ami-0e78494a87c4df251) in *us-west-2* (that you can [cop
 The instance should have the IAM Role and Security Group you created in the [**One-time Setup**](https://github.com/stanford-mast/INFaaS#one-time-setup) attached to it.
 2. If you don't use our AMI (which already has INFaaS's directory set up), clone the INFaaS repository: `git clone https://github.com/stanford-mast/INFaaS.git`.
 3. Open `start_infaas.sh` and fill in the following entries:
-```
-###### UPDATE THESE VALUES BEFORE RUNNING ######
-REGION='<REGION>'
-ZONE='<ZONE>'
-SECURITY_GROUP='<SECURITYGROUP>'
-IAM_ROLE='<IAMROLE>'
-MODELDB='<MYMODELDB>'
-CONFIGDB='<MYCONFIG>'
-WORKER_IMAGE='<INFAASAMI>'
-NUM_INIT_CPU_WORKERS=1
-NUM_INIT_GPU_WORKERS=0
-MAX_WORKERS=5 # Used for VM daemon to avoid unstable behavior
-KEY_NAME='worker_key'
-MACHINE_TYPE_GPU='p3.2xlarge'
-MACHINE_TYPE_CPU='m5.2xlarge'
-DELETE_MACHINES='2' # 0: VM daemon stops machines; 1: VM daemon deletes machines; 2: VM daemon persists machines, but removes them from INFaaS's view
-```
+    ```
+    ###### UPDATE THESE VALUES BEFORE RUNNING ######
+    REGION='<REGION>'
+    ZONE='<ZONE>'
+    SECURITY_GROUP='<SECURITYGROUP>'
+    IAM_ROLE='<IAMROLE>'
+    MODELDB='<MYMODELDB>'
+    CONFIGDB='<MYCONFIG>'
+    WORKER_IMAGE='<INFAASAMI>'
+    NUM_INIT_CPU_WORKERS=1
+    NUM_INIT_GPU_WORKERS=0
+    MAX_WORKERS=5 # Used for VM daemon to avoid unstable behavior
+    KEY_NAME='worker_key'
+    MACHINE_TYPE_GPU='p3.2xlarge'
+    MACHINE_TYPE_CPU='m5.2xlarge'
+    DELETE_MACHINES='2' # 0: VM daemon stops machines; 1: VM daemon deletes machines; 2: VM daemon persists machines, but removes them from INFaaS's view
+    ```
+    **Note:** If you would like to run the example below, you can either set CONFIGDB to be *infaas-sample-public/configs* or copy its contents over to your own configuration bucket using the [AWS CLI](https://docs.aws.amazon.com/cli/latest/reference/s3/cp.html):
+    ```
+    aws s3 sync s3://infaas-sample-public/ s3://your-config-bucket/ --exclude "resnet*"
+    ```
 3. Run `./start_infaas.sh`.
 This will set up all INFaaS components and initial workers, as well as run some basic tests to check that the system is properly set up.
 All executables can be found in `build/bin`.
@@ -62,9 +66,9 @@ We plan to make this process more automated in the future, but for now:
 - Run `./profile_model.sh <frozen-model-path> <accuracy> <dataset> <task> [cpus]`
 The script is interactive and will prompt you for information needed to profile your model.
 Once complete, it will output a configuration (.config) file.
-Upload this configuration file to your configuration bucket configured in the **One-time Setup**. Here is how you would do this with the [AWS CLI](https://docs.aws.amazon.com/cli/latest/reference/s3/cp.html):
+Upload this configuration file to your configuration bucket configured in the [**One-time Setup**](https://github.com/stanford-mast/INFaaS#one-time-setup). Here is how you would do this with the [AWS CLI](https://docs.aws.amazon.com/cli/latest/reference/s3/cp.html):
   ```
-  aws s3 cp mymodel.config s3://my-config-bucket/mymodel.config
+  aws s3 cp mymodel.config s3://your-config-bucket/mymodel.config
   ```
 - Pass the .config (e.g., *mymodel.config*, not *my-config-bucket/mymodel.config*) to `infaas_modelregistration` as the second parameter.
 
