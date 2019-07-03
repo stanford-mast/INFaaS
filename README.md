@@ -55,7 +55,7 @@ The instance should have the IAM Role and Security Group you created in the [**O
     ```
     aws s3 sync s3://infaas-sample-public/ s3://your-config-bucket/ --exclude "resnet*"
     ```
-3. Run `./start_infaas.sh`.
+3. Run `./start_infaas.sh` from the INFaaS home directory (i.e., the directory that `start_infaas.sh` is located in).
 This will set up all INFaaS components and initial workers, as well as run some basic tests to check that the system is properly set up.
 All executables can be found in `build/bin`.
 
