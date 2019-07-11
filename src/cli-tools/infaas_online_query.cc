@@ -287,13 +287,15 @@ int main(int argc, char** argv) {
             << " reply/replies, reply[0] size: " << query_reply[0].size();
   std::cout << std::endl;
 
-  if (query_reply[0].size() % sizeof(float)) { return 0; }
+  if (query_reply[0].size() % sizeof(float)) {
+    return 0;
+  }
 
   int cnt = 1;
   float f;
   for (std::string qr : query_reply) {
     std::cout << "Prediction " << cnt << ": " << std::endl;
-    for (int i = 0; i < qr.size() / sizeof(f); i += sizeof(f)) {
+    for (int i = 0; i < qr.size(); i += sizeof(f)) {
       uchar b[] = {qr[i], qr[i + 1], qr[i + 2], qr[i + 3]};
       memcpy(&f, &b, sizeof(f));
       std::cout << f << " ";
