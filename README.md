@@ -74,7 +74,7 @@ Upload this configuration file to your configuration bucket configured in the [*
 
 **Example**
 
-In `infaas-sample-public`, we have provided a CPU TensorFlow model and an equivalent TensorRT model optimized for batch-4. We also provide their respective configuration files which were generated as specified above using `src/profiler/profile_model.sh`. Register both models as follows:
+In `infaas-sample-public`, we have provided a CPU TensorFlow model and an equivalent TensorRT model optimized for batch-4. We also provide their respective configuration files that were generated as specified above using `src/profiler/profile_model.sh`. Register both models as follows:
 ```
 ./infaas_modelregistration resnet_v1_50_4.config infaas-sample-public/resnet_v1_50_4/
 ./infaas_modelregistration resnet50_tensorflow-cpu_4.config infaas-sample-public/resnet50_tensorflow-cpu_4/
@@ -138,4 +138,4 @@ Pull requests are welcome.
 ### Reference
 For details about INFaaS, please refer to the following two papers. We kindly ask that you cite them should you use INFaaS in your work.
 - Neeraja J. Yadwadkar, Francisco Romero, Qian Li, Christos Kozyrakis. [A Case for *Managed* and *Model-less* Inference Serving](https://dl.acm.org/citation.cfm?id=3321443). In *Proceedings of the Workshop on Hot Topics in Operating Systems* (HotOS), 2019.
-- Francisco Romero*, Qian Li*, Neeraja J. Yadwadkar, Christos Kozyrakis. [INFaaS: Managed & Model-less Inference Serving](https://arxiv.org/abs/1905.13348). In *CoRR* (arXiv:1905.13348), 2019.
+- Francisco Romero*, Qian Li*, Neeraja J. Yadwadkar, Christos Kozyrakis. [INFaaS: A *Model-less* Inference Serving System](https://arxiv.org/abs/1905.13348). In *CoRR* (arXiv:1905.13348), 2019.
