@@ -68,9 +68,11 @@ public:
 
   // Scale up/down on CPU/GPU. The daemon for actual execution.
   static void GpuAutoscalerDaemon(const std::string& worker_name,
+                                  const AutoscalerType& atype,
                                   std::unique_ptr<RedisMetadata>& rmd,
                                   std::unique_ptr<Aws::S3::S3Client>& s3c);
   static void CpuAutoscalerDaemon(const std::string& worker_name,
+                                  const AutoscalerType& atype,
                                   std::unique_ptr<RedisMetadata>& rmd,
                                   std::unique_ptr<Aws::S3::S3Client>& s3c);
 

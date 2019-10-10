@@ -21,7 +21,7 @@
  */
 
 #include <time.h>
-#include <algorithm>  // sort, set_intersection, min, shuffle
+#include <algorithm>  // sort, set_intersection, min, max, shuffle
 #include <chrono>
 #include <cstdint>
 #include <deque>
@@ -29,6 +29,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <random>
 #include <set>
 #include <string>
 #include <utility>
@@ -54,10 +55,18 @@ using grpc::Status;
 static const int MAX_GRPC_MESSAGE_SIZE = INT32_MAX;
 
 // Decision-making constants
-static const int16_t gmod_max_results = 7;
+static const double gmod_md_lat = 0.600;
 static const int16_t gmod_max_lru = 5;
-static const int16_t qps_vm_scale_query_limit = 500;
+
+// Scale-based-on-QPS constants.
+static const int16_t qps_vm_scale_query_limit = 200;
 static const double qps_vm_scale_time_interval = 1000.0;
+static const int16_t qps_model_query_limit = 100;
+
+// Used to generate ramdom numbers.
+std::random_device master_rd;
+std::uniform_real_distribution<double> uniformRG(0, 1.0);
+static const double blist_skip_thresh = 0.1;
 
 enum MasterDecisions {
   INFAAS_ALL = 0,
@@ -65,7 +74,9 @@ enum MasterDecisions {
   ROUNDROBIN = 2,
   ROUNDROBIN_STATIC = 3,
   GPUSHARETRIGGER = 4,
-  CPUBLISTCHECK = 5
+  CPUBLISTCHECK = 5,
+  GPUSHARETRIGGER_SKIPBLIST = 6,
+  ROUNDROBIN_DYNAMIC = 7
 };
 
 namespace infaaspublic {
@@ -92,10 +103,11 @@ void parse_s3_url(const std::string& src_url, std::string* src_bucket,
 class QueryServiceImpl final : public Query::Service {
 public:
   QueryServiceImpl(const struct Address redis_addr,
-                   const int8_t decision_policy)
+                   const int8_t decision_policy, const int16_t slack_gpu)
       : redis_addr_(redis_addr),
         all_exec_counter_(0),
         all_exec_gpu_counter_(0),
+        slack_gpu_(slack_gpu),
         last_worker_picked_("") {
     rm_ = std::unique_ptr<RedisMetadata>(new RedisMetadata(redis_addr_));
 
@@ -117,6 +129,12 @@ public:
     } else if (decision_policy == 5) {
       master_decision_ = CPUBLISTCHECK;
       std::cout << "Using mode: CPUBLISTCHECK" << std::endl;
+    } else if (decision_policy == 6) {
+      master_decision_ = GPUSHARETRIGGER_SKIPBLIST;
+      std::cout << "Using mode: GPUSHARETRIGGER_SKIPBLIST" << std::endl;
+    } else if (decision_policy == 7) {
+      master_decision_ = ROUNDROBIN_DYNAMIC;
+      std::cout << "Using mode: ROUNDROBIN_DYNAMIC" << std::endl;
     } else {
       std::cerr << (int16_t)decision_policy << " is not a valid decision policy"
                 << std::endl;
@@ -125,9 +143,12 @@ public:
 
     // Set up workers for Round-Robin
     if ((master_decision_ == ROUNDROBIN) ||
-        (master_decision_ == ROUNDROBIN_STATIC)) {
+        (master_decision_ == ROUNDROBIN_STATIC) ||
+        (master_decision_ == ROUNDROBIN_DYNAMIC)) {
       // Get all executors
       all_exec_ = rm_->get_all_executors();
+      std::cout << "[LOG]: There are " << all_exec_.size() << " workers";
+      std::cout << std::endl;
       for (std::string ae : all_exec_) {
         if (!rm_->is_exec_onlycpu(ae)) { all_gpu_exec_.push_back(ae); }
       }
@@ -137,8 +158,8 @@ public:
 private:
   // The assumption for this function is that BOTH an accuracy and a latency
   //// constraint are provided. The search will first check for models that
-  ///satisfy the / accuracy constraint before moving on to finding one that
-  ///satisfies latency.
+  /// satisfy the / accuracy constraint before moving on to finding one that
+  /// satisfies latency.
   // This algorithm is similar to the parent latency-accuracy search with the
   // exception
   //// that the initial model pruning cannot be an exhaustive search
@@ -147,8 +168,8 @@ private:
       const int64_t& latency_constraint, const int16_t& batch_size,
       int8_t* is_running, MasterDecisions dec_policy) {
     // Do a tailored fast check search using the last couple of queries.
-    // If there is a valid running model, use it. Otherwise, do an exhaustive
-    // search.
+    // If there is a valid running model, use it.
+    // Otherwise, check a subset of options.
     if (!gmod_cache_.empty()) {
       std::string candidate_model;
       for (std::string avl : gmod_cache_) {
@@ -194,7 +215,15 @@ private:
 
           mv_inf_lat = slope * batch_for_compute + intercept;
           if (mv_inf_lat > 0.0) {
-            if (mv_inf_lat > latency_constraint) { continue; }
+            if (mv_inf_lat > latency_constraint) {
+              continue;
+            } else if ((latency_constraint > 100.0) && (mv_inf_lat < 100.0)) {
+              // Don't pick GPU for CPU constraint
+              std::cout << "[LOG]: GPAR fast-check: Skipping GPU variant for "
+                           "loose latency";
+              std::cout << std::endl;
+              continue;
+            }
           } else {
             return {};
           }
@@ -248,8 +277,9 @@ private:
               std::cout << "[LOG]: Picking blacklisted GPU model in fast-check"
                         << std::endl;
               if ((dec_policy == GPUSHARETRIGGER) ||
-                  (dec_policy ==
-                   CPUBLISTCHECK)) {  // Ask for new VM from autoscaler
+                  (dec_policy == GPUSHARETRIGGER_SKIPBLIST) ||
+                  (dec_policy == CPUBLISTCHECK)) {
+                // Ask for new VM from autoscaler
                 std::cout << "[LOG]: GPU model blacklisted in fast-check,";
                 std::cout << " triggering new VM" << std::endl;
                 rm_->set_vm_scale();
@@ -283,6 +313,18 @@ private:
     int16_t min_valid_batch = 512;
     bool general_valid_model = false;
     bool cpu_blacklisted = false;
+
+    // Automatically set max number of search results based on user latency.
+    // Using 15% of user latency (which can change, but should be fine since
+    // at this point we're no longer relying on the cache to save us)
+    double fraction = latency_constraint * 0.15;
+    int16_t gmod_max_results = (int16_t)(fraction / gmod_md_lat);
+    // Search for at least 3
+    gmod_max_results = std::max(gmod_max_results, (int16_t)3);
+    // Search for at most 20
+    // gmod_max_results = std::min(gmod_max_results, (int16_t) 20);
+    std::cout << "[LOG]: Searching a maximum of: " << gmod_max_results
+              << std::endl;
 
     // Get feasible models based on accuracy
     acc_opts =
@@ -341,7 +383,14 @@ private:
 
         mv_inf_lat = slope * batch_for_compute + intercept;
         if (mv_inf_lat > 0.0) {
-          if (mv_inf_lat > latency_constraint) { continue; }
+          if (mv_inf_lat > latency_constraint) {
+            continue;
+          } else if ((latency_constraint > 100.0) && (mv_inf_lat < 100.0)) {
+            // Don't pick GPU for CPU constraint
+            std::cout << "[LOG]: Skipping GPU variant for loose latency";
+            std::cout << std::endl;
+            continue;
+          }
         } else {
           return {};
         }
@@ -437,8 +486,9 @@ private:
                 candidate_variant.second = lat_diff;
               }
               if ((dec_policy == GPUSHARETRIGGER) ||
-                  (dec_policy ==
-                   CPUBLISTCHECK)) {  // Ask for new VM from autoscaler
+                  (dec_policy == GPUSHARETRIGGER_SKIPBLIST) ||
+                  (dec_policy == CPUBLISTCHECK)) {
+                // Ask for new VM from autoscaler
                 std::cout << "[LOG]: GPU model blacklisted, triggering new VM"
                           << std::endl;
                 rm_->set_vm_scale();
@@ -457,7 +507,7 @@ private:
         // "Punish" these models by adding an extra 1000ms; otherwise, for very
         // small
         //// models it is possible for these models to look "better" than loaded
-        ///models
+        /// models
         std::cout << "[LOG]: Model not running, recording total latency"
                   << std::endl;
         double mv_load_lat = rm_->get_load_lat(av);
@@ -534,6 +584,8 @@ private:
     std::pair<std::string, double> candidate_variant("dummy", 100000.0);
     int16_t max_batch_blisted = 0;
     std::pair<std::string, int16_t> min_valid_batch = {"dummy", 512};
+    // Remember a blacklisted fast check variant.
+    std::string blist_fast_check_avl = "dummy";
 
     // Skip scaledown check if CPU model is blacklisted
     bool skip_scaledown = false;
@@ -610,13 +662,15 @@ private:
             return {avl};
           } else {  // It's blacklisted
             std::cout << "[LOG]: Failed blacklist check" << std::endl;
+            blist_fast_check_avl = avl;
             // If it's a GPU fast check, return it, but set is_running to 0
             if (mv_batch_int < 64) {
               std::cout << "[LOG]: Picking blacklisted GPU model in fast-check"
                         << std::endl;
               if ((dec_policy == GPUSHARETRIGGER) ||
-                  (dec_policy ==
-                   CPUBLISTCHECK)) {  // Ask for new VM from autoscaler
+                  (dec_policy == GPUSHARETRIGGER_SKIPBLIST) ||
+                  (dec_policy == CPUBLISTCHECK)) {
+                // Ask for new VM from autoscaler
                 std::cout << "[LOG]: GPU model blacklisted in fast-check,";
                 std::cout << " triggering new VM" << std::endl;
                 rm_->set_vm_scale();
@@ -821,8 +875,9 @@ private:
                 gpu_blisted = true;
               }
               if ((dec_policy == GPUSHARETRIGGER) ||
-                  (dec_policy ==
-                   CPUBLISTCHECK)) {  // Ask for new VM from autoscaler
+                  (dec_policy == GPUSHARETRIGGER_SKIPBLIST) ||
+                  (dec_policy == CPUBLISTCHECK)) {
+                // Ask for new VM from autoscaler
                 std::cout << "[LOG]: GPU model blacklisted, triggering new VM"
                           << std::endl;
                 rm_->set_vm_scale();
@@ -925,9 +980,23 @@ private:
       } else {  // Model(s) running, but blacklisted
         std::cout << "[LOG]: Valid models found, but were blacklisted..."
                   << std::endl;
+        *is_running = 0;  // Model not running; ask master to pick a worker
         // If max_batch_blisted is a CPU model, move to the first valid batch
         // model on GPU
         if (min_valid_batch.first != "dummy") {
+          // If we send queries to a non-loaded model (especially
+          // CPU->GPU), then the next few queries will fail.
+          // Since the blacklist updates every second,
+          // we should still send some fraction of the load to it.
+          std::mt19937 gen(master_rd());
+          double rand_blist_val = uniformRG(gen);
+          if ((rand_blist_val < blist_skip_thresh) &&
+              (blist_fast_check_avl != "dummy")) {
+            std::cout << "[LOG]: Sending to blacklisted model: ";
+            std::cout << blist_fast_check_avl << std::endl;
+
+            return {blist_fast_check_avl};
+          }
           std::cout << "[LOG]: " << min_valid_batch.first
                     << " meets batch constraint";
           std::cout << " from blacklist" << std::endl;
@@ -957,7 +1026,7 @@ private:
     std::string submitter = request->submitter();
     auto slo = request->slo();
 
-    std::string next_worker;
+    std::string next_worker = "dummy";
     struct Address dest_addr = {"0", "0"};
     int8_t is_running = 1;  // Will be changed below if applicable
 
@@ -971,7 +1040,9 @@ private:
       // Check if model is running
       // If decision mode is not INFAAS_ALL, set to 0 since we are using a naive
       // policy
-      if (master_decision_ != ROUNDROBIN) {
+      if ((master_decision_ != ROUNDROBIN) &&
+          (master_decision_ != ROUNDROBIN_STATIC) &&
+          (master_decision_ != ROUNDROBIN_DYNAMIC)) {
         is_running = rm_->is_model_running(model);
       } else {
         is_running = 0;
@@ -1038,16 +1109,123 @@ private:
       model = meets_slo[0];
     }
 
-    // By this point, we have a model.
-    bool valid_is_running = false;
+    // By this point, we have a model
     std::cout << "[LOG]: Model variant selected is: " << model << std::endl;
-    if (is_running < 0) {
+
+    // Track QPS for GPU variants
+    std::chrono::time_point<std::chrono::system_clock> curr_time =
+        std::chrono::system_clock::now();
+
+    if (std::stoi(rm_->get_model_info(model, "max_batch")) < 64) {
+      std::cout << "[LOG]: Logging GPU variant's QPS" << std::endl;
+      if (variant_qps_tracker_.find(model) == variant_qps_tracker_.end()) {
+        // Not seen before
+        variant_qps_tracker_.insert(
+            std::pair<
+                std::string,
+                std::pair<std::chrono::time_point<std::chrono::system_clock>,
+                          int16_t>>(
+                model,
+                std::pair<std::chrono::time_point<std::chrono::system_clock>,
+                          int16_t>(curr_time, 1)));
+      } else {
+        // Seen before
+        auto time_difference =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                curr_time - variant_qps_tracker_[model].first)
+                .count();
+
+        std::cout << "[LOG]: Interval: " << time_difference << std::endl;
+        variant_qps_tracker_[model].first = curr_time;  // Update time
+
+        // If this variant is already exclusively on a GPU, check that
+        //// the variant is still running on it and that the worker
+        //// still exists.
+        // If yes to both, pick it. Otherwise, reset the variant to
+        //// be eligible for sharing a GPU again
+
+        if (model_to_exclusive_.find(model) != model_to_exclusive_.end()) {
+          std::string candidate_worker = model_to_exclusive_[model];
+          // Always send to candidate worker if running.
+          // The problem is that the model will not show up as running
+          //// fast enough, so the master will think it is not exclusive
+          //// anymore, but once it is, the metadata store will think
+          //// it's exclusive and never use it.
+
+          // if (rm_->is_model_running(model, candidate_worker) == 1) {
+          if (rm_->executor_exists(candidate_worker)) {
+            next_worker = candidate_worker;
+            std::cout << "[LOG]: Picking " << next_worker << " for ";
+            std::cout << model << " from exclusive" << std::endl;
+          } else {
+            variant_qps_tracker_[model].second = 0;
+            model_to_exclusive_.erase(model);
+            std::cout << "[LOG]: Resetting " << model;
+            std::cout << " from exclusive" << std::endl;
+          }
+        } else {
+          // If the interval is less than one second and the QPS exceeds
+          //// the threshold, assign this variant an exclusive GPU
+          //// and start a new slack GPU worker
+          if (time_difference < qps_vm_scale_time_interval) {
+            std::cout << "[LOG]: Less than one second between requests ";
+            std::cout << "to " << model << std::endl;
+            int16_t curr_model_qps = ++variant_qps_tracker_[model].second;
+
+            if (curr_model_qps == qps_model_query_limit) {
+              std::cout << "[LOG]: " << model << " becoming exclusive";
+              std::cout << std::endl;
+
+              // Find first available slack worker
+              //// If all taken, go to shared worker picking
+              std::vector<std::string> gpu_cand = rm_->min_gpu_util_name(10);
+              for (auto gc : gpu_cand) {
+                std::string check_slack = rm_->is_exec_slack(gc);
+                std::cout << "[LOG]: Slack for " << gc << " is ";
+                std::cout << check_slack << std::endl;
+                if (check_slack == "0") {
+                  std::cout << "[LOG]: Found slack worker " << gc;
+                  std::cout << std::endl;
+                  rm_->set_exec_slack(gc, model);
+                  model_to_exclusive_.insert(
+                      std::pair<std::string, std::string>(model, gc));
+                  next_worker = gc;
+                  // Set slack scale to add another slack worker
+                  rm_->set_slack_scale();
+                  break;
+                }
+              }
+
+              if (next_worker != "dummy") {
+                std::cout << "[LOG]: " << next_worker << " GPU is now ";
+                std::cout << "exclusively serving " << model << std::endl;
+              } else {
+                std::cout << "[LOG]: No exclusive option found for ";
+                std::cout << model << ", going to shared..." << std::endl;
+              }
+
+              variant_qps_tracker_[model].second = 0;
+            }
+          } else {
+            std::cout << "[LOG]: Over one second between variant requests, ";
+            std::cout << "resetting counter" << std::endl;
+            variant_qps_tracker_[model].second = 0;
+          }
+        }
+      }
+    }
+
+    // If the GPU exclusive tracking selected a worker, skip worker selection
+    bool valid_is_running = false;
+    if (next_worker != "dummy") {
+      std::cout << "[LOG]: GPu exclusive already picked worker" << std::endl;
+      valid_is_running = true;
+    } else if (is_running < 0) {
       // Since we have already checked if the model is registered,
       // if is_running < 0, the Redis query failed
       std::cout << "[LOG]: is_running is negative!" << std::endl;
       throw std::runtime_error("Query to Redis failed");
     } else if (is_running) {
-      // By this point, we know this return value will be valid
       std::vector<std::string> dest_name = rm_->min_qps_name(model, 3);
       if (dest_name.empty()) {
         // If this happens, it means the model was shut down in the time that a
@@ -1065,6 +1243,7 @@ private:
         for (std::string d : dest_name) { std::cout << "\t" << d << std::endl; }
 
         if ((master_decision_ == GPUSHARETRIGGER) ||
+            (master_decision_ == GPUSHARETRIGGER_SKIPBLIST) ||
             (master_decision_ == CPUBLISTCHECK)) {
           // Seed for shuffle
           uint64_t seed =
@@ -1075,25 +1254,39 @@ private:
             std::cout << "\t" << d << std::endl;
           }
         }
+
         // Now walk through the candidates and select the first one that passes
-        //// both blacklist checks
+        //// both blacklist checks and is not exclusive
         for (std::string d : dest_name) {
           std::cout << "[LOG]: Checking " << d << std::endl;
           if (rm_->is_blacklisted(d)) {
             std::cout << "[LOG]: " << d << " is blacklisted.";
             continue;
+          } else if (rm_->is_exec_slack(d) != "NS") {
+            std::cout << "[LOG]: " << d << " is exclusive.";
+            continue;
           } else {
-            // If a model-variant was provided but is blacklisted on the
-            // requested worker,
-            //// leave valid_is_running as false
-            int8_t is_blisted = rm_->get_model_avglat_blacklist(d, model);
-            if (is_blisted) {
-              std::cout << "[LOG]: " << d << " has blacklisted " << model
-                        << std::endl;
-            } else {
+            if (master_decision_ == GPUSHARETRIGGER_SKIPBLIST) {
+              // Pick the worker regardless of whether the variant
+              //// is blacklisted on it
+              std::cout << "[LOG]: Not checking model blacklist, picking ";
+              std::cout << d << std::endl;
+
               next_worker = d;
               valid_is_running = true;
               break;
+            } else {
+              // If a model-variant was provided but is blacklisted on the
+              // requested worker, leave valid_is_running as false
+              int8_t is_blisted = rm_->get_model_avglat_blacklist(d, model);
+              if (is_blisted) {
+                std::cout << "[LOG]: " << d << " has blacklisted " << model
+                          << std::endl;
+              } else {
+                next_worker = d;
+                valid_is_running = true;
+                break;
+              }
             }
           }
         }
@@ -1106,10 +1299,12 @@ private:
         std::cout << " or model is not running anymore." << std::endl;
       }
     }
-    if (!valid_is_running) {  // Not running, make decision based on executor +
-                              // decision mode
+
+    // Not running, make decision based on executor + decision mode
+    if (!valid_is_running) {
       if ((master_decision_ != ROUNDROBIN) &&
-          (master_decision_ != ROUNDROBIN_STATIC)) {
+          (master_decision_ != ROUNDROBIN_STATIC) &&
+          (master_decision_ != ROUNDROBIN_DYNAMIC)) {
         // Use this to figure out if a model needs a GPU
         std::string mv_batch = rm_->get_model_info(model, "max_batch");
         bool needs_gpu = std::stoi(mv_batch) < 64;
@@ -1190,7 +1385,12 @@ private:
                           << " because it is CPU only";
                 std::cout << std::endl;
                 continue;
+              } else if (needs_gpu && rm_->is_exec_slack(inter) != "NS") {
+                std::cout << "[LOG]: Skipping " << inter;
+                std::cout << " because it is exclusive" << std::endl;
+                continue;
               }
+
               if (last_worker_picked_ != inter) {
                 next_worker = inter;
                 last_worker_picked_ = inter;
@@ -1206,24 +1406,52 @@ private:
 
         // No available worker found.
         // This likely occurred because there was more than one worker, but only
-        // one GPU
-        //// instance, and it was last picked.
-        // Simply use last_worker_picked_.
+        //// one GPU instance, and it was last picked.
+        // Use last_worker_picked_.
         if (next_worker.empty()) {
           std::cout << "[LOG]: Warning: next_worker is empty. Using last worker"
                     << std::endl;
           next_worker = last_worker_picked_;
         }
-      } else {
-        if (master_decision_ == ROUNDROBIN_STATIC) {
+      } else {  // Any of the RRs
+        if ((master_decision_ == ROUNDROBIN_STATIC) ||
+            (master_decision_ == ROUNDROBIN_DYNAMIC)) {
+          bool need_new_worker = true;
           if (static_model_worker_map_.find(model) !=
               static_model_worker_map_.end()) {
             std::cout << "[LOG]: " << model << " previously queried"
                       << std::endl;
-            next_worker = static_model_worker_map_[model];
-          } else {
-            std::cout << "[LOG]: " << model << " not seen before, using RR"
-                      << std::endl;
+
+            // If ROUNDROBIN_DYNAMIC, check if worker is blacklisted.
+            // If so, ask for it to be updated.
+            if (master_decision_ == ROUNDROBIN_DYNAMIC) {
+              std::string check_worker = static_model_worker_map_[model];
+              int8_t is_blisted =
+                  rm_->get_model_avglat_blacklist(check_worker, model);
+              if (is_blisted < 0) {
+                std::cout << "[LOG]: For RR_DYNAMIC, " << check_worker;
+                std::cout << " is either not running " << model;
+                std::cout << "or got shut down, getting new worker"
+                          << std::endl;
+              } else if (is_blisted == 1) {
+                std::cout << "[LOG]: For RR_DYNAMIC, " << check_worker;
+                std::cout << " has blacklisted " << model;
+                std::cout << ", getting new worker" << std::endl;
+              } else {
+                std::cout << "[LOG]: For RR_DYNAMIC, " << check_worker;
+                std::cout << " passes blacklist." << std::endl;
+                next_worker = check_worker;
+                need_new_worker = false;
+              }
+            } else {
+              next_worker = static_model_worker_map_[model];
+              need_new_worker = false;
+            }
+          }
+
+          if (need_new_worker) {
+            std::cout << "[LOG]: " << model << " not seen before";
+            std::cout << " or worker was blacklisted; using RR" << std::endl;
 
             // Pick the next worker and increment the round robin counter
             // If a GPU is needed, walk through all workers until a GPU is found
@@ -1232,19 +1460,48 @@ private:
             std::cout << "[LOG]: Needs GPU: " << (int16_t)needs_gpu
                       << std::endl;
 
-            if (needs_gpu) {
-              next_worker = all_gpu_exec_[all_exec_gpu_counter_];
-              all_exec_gpu_counter_ =
-                  (all_exec_gpu_counter_ + 1) % all_gpu_exec_.size();
-            } else {
-              next_worker = all_exec_[all_exec_counter_];
-              all_exec_counter_ = (all_exec_counter_ + 1) % all_exec_.size();
-            }
+            if (master_decision_ == ROUNDROBIN_DYNAMIC) {
+              // Since the # of workers can dynamically change, we need to
+              //// first get all workers, and second collect all GPU workers
+              //// if needed
+              std::vector<std::string> all_exec_rrd = rm_->get_all_executors();
+              std::cout << "[LOG]: RRD => " << all_exec_rrd.size();
+              std::cout << " workers" << std::endl;
+              if (needs_gpu) {
+                std::vector<std::string> all_gpu_exec_rrd;
+                for (std::string ae : all_exec_rrd) {
+                  if (!rm_->is_exec_onlycpu(ae)) {
+                    all_gpu_exec_rrd.push_back(ae);
+                  }
+                }
 
-            static_model_worker_map_.insert(
-                std::pair<std::string, std::string>(model, next_worker));
+                // Mod counter before, in case number of workers decreased
+                all_exec_gpu_counter_ %= all_gpu_exec_rrd.size();
+                next_worker = all_gpu_exec_rrd[all_exec_gpu_counter_];
+                all_exec_gpu_counter_++;
+              } else {
+                // Mod counter before, in case number of workers decreased
+                all_exec_counter_ %= all_exec_rrd.size();
+                next_worker = all_exec_rrd[all_exec_counter_];
+                all_exec_counter_++;
+              }
+
+              static_model_worker_map_[model] = next_worker;
+            } else {  // RR_STATIC
+              if (needs_gpu) {
+                next_worker = all_gpu_exec_[all_exec_gpu_counter_];
+                all_exec_gpu_counter_ =
+                    (all_exec_gpu_counter_ + 1) % all_gpu_exec_.size();
+              } else {
+                next_worker = all_exec_[all_exec_counter_];
+                all_exec_counter_ = (all_exec_counter_ + 1) % all_exec_.size();
+              }
+
+              static_model_worker_map_.insert(
+                  std::pair<std::string, std::string>(model, next_worker));
+            }
           }
-        } else {
+        } else {  // Regular ROUNDROBIN
           // Get all executors
           std::vector<std::string> all_exec_ = rm_->get_all_executors();
 
@@ -1268,8 +1525,7 @@ private:
     }
 
     // Update qps worker map
-    std::chrono::time_point<std::chrono::system_clock> curr_time =
-        std::chrono::system_clock::now();
+    // curr_time set above in variant QPS tracking
     if (qps_worker_scaler_.find(next_worker) == qps_worker_scaler_.end()) {
       qps_worker_scaler_.insert(
           std::pair<
@@ -1292,9 +1548,16 @@ private:
                   << std::endl;
         if (qps_worker_scaler_[next_worker].second ==
             qps_vm_scale_query_limit) {
-          std::cout << "[LOG]: Setting VM Scale, " << next_worker;
-          std::cout << " is overloaded" << std::endl;
-          // rm_->set_vm_scale();
+          std::cout << "[LOG]: " << next_worker << " is overloaded";
+          std::cout << std::endl;
+
+          // Only set VM scale if this is ROUNDROBIN_DYNAMIC.
+          // Otherwise, scaling known to be unstable
+          if (master_decision_ == ROUNDROBIN_DYNAMIC) {
+            std::cout << "[LOG]: RR_DYNAMIC, setting VM scale" << std::endl;
+            rm_->set_vm_scale();
+          }
+
           qps_worker_scaler_[next_worker].first = curr_time;
           qps_worker_scaler_[next_worker].second = 0;
           // If there is more than one worker, blacklist this worker
@@ -1433,7 +1696,8 @@ private:
     // utilization. Otherwise, select using round-robin.
     std::string next_worker;
     if ((master_decision_ != ROUNDROBIN) &&
-        (master_decision_ != ROUNDROBIN_STATIC)) {
+        (master_decision_ != ROUNDROBIN_STATIC) &&
+        (master_decision_ != ROUNDROBIN_DYNAMIC)) {
       std::vector<std::string> min_cpu = rm_->min_cpu_util_name(10);
 
       // Shuffle to load-balance
@@ -1451,11 +1715,24 @@ private:
       if (min_cpu.size() == 1) {
         next_worker = min_cpu[0];
       } else {
+        int16_t num_cpu_workers = rm_->get_num_cpu_executors();
         for (const std::string mc : min_cpu) {
           if (last_worker_picked_ != mc) {
-            next_worker = mc;
-            last_worker_picked_ = mc;
-            break;
+            if (num_cpu_workers > 0) {
+              if (rm_->is_exec_onlycpu(mc)) {
+                std::cout << "[LOG]: Offline job going to CPU-only worker: ";
+                std::cout << mc << std::endl;
+                next_worker = mc;
+                last_worker_picked_ = mc;
+                break;
+              }
+            } else {
+              std::cout << "[LOG]: Offline job going to GPU worker ";
+              std::cout << "(No GPU): " << mc << std::endl;
+              next_worker = mc;
+              last_worker_picked_ = mc;
+              break;
+            }
           } else {
             std::cout << "[LOG]: Skipping " << mc
                       << " because it was last picked";
@@ -1464,15 +1741,43 @@ private:
         }
       }
     } else {
-      if (master_decision_ == ROUNDROBIN_STATIC) {
+      if ((master_decision_ == ROUNDROBIN_STATIC) ||
+          (master_decision_ == ROUNDROBIN_DYNAMIC)) {
+        bool need_new_worker = true;
         if (static_model_worker_map_.find(model_var) !=
             static_model_worker_map_.end()) {
           std::cout << "[LOG]: " << model_var << " previously queried"
                     << std::endl;
-          next_worker = static_model_worker_map_[model_var];
-        } else {
-          std::cout << "[LOG]: " << model_var << " not seen before, using RR"
-                    << std::endl;
+
+          // If ROUNDROBIN_DYNAMIC, check if worker is blacklisted.
+          // If so, ask for it to be updated.
+          if (master_decision_ == ROUNDROBIN_DYNAMIC) {
+            std::string check_worker = static_model_worker_map_[model_var];
+            int8_t is_blisted =
+                rm_->get_model_avglat_blacklist(check_worker, model_var);
+            if (is_blisted < 0) {
+              std::cout << "[LOG]: For RR_DYNAMIC, " << check_worker;
+              std::cout << " is either not running " << model_var;
+              std::cout << "or got shut down, getting new worker" << std::endl;
+            } else if (is_blisted == 1) {
+              std::cout << "[LOG]: For RR_DYNAMIC, " << check_worker;
+              std::cout << " has blacklisted " << model_var;
+              std::cout << ", getting new worker" << std::endl;
+            } else {
+              std::cout << "[LOG]: For RR_DYNAMIC, " << check_worker;
+              std::cout << " passes blacklist." << std::endl;
+              next_worker = check_worker;
+              need_new_worker = false;
+            }
+          } else {
+            next_worker = static_model_worker_map_[model_var];
+            need_new_worker = false;
+          }
+        }
+
+        if (need_new_worker) {
+          std::cout << "[LOG]: " << model_var << " not seen before";
+          std::cout << " or worker was blacklisted; using RR" << std::endl;
 
           // Pick the next worker and increment the round robin counter
           // If a GPU is needed, walk through all workers until a GPU is found
@@ -1480,19 +1785,48 @@ private:
           bool needs_gpu = std::stoi(mv_batch) < 64;
           std::cout << "[LOG]: Needs GPU: " << (int16_t)needs_gpu << std::endl;
 
-          if (needs_gpu) {
-            next_worker = all_gpu_exec_[all_exec_gpu_counter_];
-            all_exec_gpu_counter_ =
-                (all_exec_gpu_counter_ + 1) % all_gpu_exec_.size();
-          } else {
-            next_worker = all_exec_[all_exec_counter_];
-            all_exec_counter_ = (all_exec_counter_ + 1) % all_exec_.size();
-          }
+          if (master_decision_ == ROUNDROBIN_DYNAMIC) {
+            // Since the # of workers can dynamically change, we need to
+            //// first get all workers, and second collect all GPU workers
+            //// if needed
+            std::vector<std::string> all_exec_rrd = rm_->get_all_executors();
+            std::cout << "[LOG]: RRD => " << all_exec_rrd.size();
+            std::cout << " workers" << std::endl;
+            if (needs_gpu) {
+              std::vector<std::string> all_gpu_exec_rrd;
+              for (std::string ae : all_exec_rrd) {
+                if (!rm_->is_exec_onlycpu(ae)) {
+                  all_gpu_exec_rrd.push_back(ae);
+                }
+              }
 
-          static_model_worker_map_.insert(
-              std::pair<std::string, std::string>(model_var, next_worker));
+              // Mod counter before, in case number of workers decreased
+              all_exec_gpu_counter_ %= all_gpu_exec_rrd.size();
+              next_worker = all_gpu_exec_rrd[all_exec_gpu_counter_];
+              all_exec_gpu_counter_++;
+            } else {
+              // Mod counter before, in case number of workers decreased
+              all_exec_counter_ %= all_exec_rrd.size();
+              next_worker = all_exec_rrd[all_exec_counter_];
+              all_exec_counter_++;
+            }
+
+            static_model_worker_map_[model_var] = next_worker;
+          } else {  // RR or RR_STATIC
+            if (needs_gpu) {
+              next_worker = all_gpu_exec_[all_exec_gpu_counter_];
+              all_exec_gpu_counter_ =
+                  (all_exec_gpu_counter_ + 1) % all_gpu_exec_.size();
+            } else {
+              next_worker = all_exec_[all_exec_counter_];
+              all_exec_counter_ = (all_exec_counter_ + 1) % all_exec_.size();
+            }
+
+            static_model_worker_map_.insert(
+                std::pair<std::string, std::string>(model_var, next_worker));
+          }
         }
-      } else {
+      } else {  // Regular ROUNDROBIN
         // Get all executors
         std::vector<std::string> all_exec_ = rm_->get_all_executors();
 
@@ -1625,16 +1959,25 @@ private:
       std::string,
       std::pair<std::chrono::time_point<std::chrono::system_clock>, int16_t>>
       qps_worker_scaler_;
+
+  std::map<
+      std::string,
+      std::pair<std::chrono::time_point<std::chrono::system_clock>, int16_t>>
+      variant_qps_tracker_;
+
+  std::map<std::string, std::string> model_to_exclusive_;
+
+  int16_t slack_gpu_;
 };
 
 }  // namespace infaasqueryfe
 }  // namespace infaaspublic
 
 void RunQueryFEServer(const struct Address& redis_addr,
-                      const int8_t decision_policy) {
+                      const int8_t decision_policy, const int16_t slack_gpu) {
   std::string server_address("0.0.0.0:50052");
-  infaaspublic::infaasqueryfe::QueryServiceImpl service(redis_addr,
-                                                        decision_policy);
+  infaaspublic::infaasqueryfe::QueryServiceImpl service(
+      redis_addr, decision_policy, slack_gpu);
 
   ServerBuilder builder;
   // Listen on the given address without any authentication mechanism.
@@ -1657,30 +2000,38 @@ void RunQueryFEServer(const struct Address& redis_addr,
 
 int main(int argc, char** argv) {
   if (argc < 4) {
-    std::cout
-        << "Usage: ./queryfe_server <redis_ip> <redis_port> <decision_policy>";
+    std::cout << "Usage: ./queryfe_server <redis_ip> <redis_port> ";
+    std::cout << "<decision_policy> [slack-gpu]" << std::endl;
+    // IMPORTANT: it is assumed that slack-gpu is valid from start_infaas
+    // Example: INFaaS starts with 4 GPUs, up to 3 can be slack.
+    std::cout << "slack-gpu: number of slack GPUs to use for exclusively ";
+    std::cout << "running popular models on GPU. Default is 0 ";
+    std::cout << "(i.e., no GPUs used for exclusive)" << std::endl;
+    std::cout << "decision_policy: 0=INFAAS_ALL, 1=INFAAS_NOQPSLAT, ";
+    std::cout << "2=ROUNDROBIN, 3=ROUNDROBIN_STATIC, ";
+    std::cout << "4=GPUSHARETRIGGER, 5=CPUBLISTCHECK, ";
+    std::cout << "6=GPUSHARETRIGGER_SKIPBLIST, 7=ROUNDROBIN_DYNAMIC";
     std::cout << std::endl;
-    std::cout
-        << "decision_policy: 0=INFAAS_ALL, 1=INFAAS_NOQPSLAT, 2=ROUNDROBIN, ";
-    std::cout << "3=ROUNDROBIN_STATIC, 4=GPUSHARETRIGGER, 5=CPUBLISTCHECK"
-              << std::endl;
+
     std::cout << "INFAAS_ALL: Use all features of INFAAS" << std::endl;
-    std::cout
-        << "INFAAS_NOQPSLAT: Only ocnsider if model is running, not QPS/latency"
-        << std::endl;
-    std::cout << "ROUNDROBIN: Pick machines in a round-robin fashion; assumes "
-                 "model-variant";
-    std::cout << " is always provided." << std::endl;
-    std::cout << "ROUNDROBIN_STATIC: Same as ROUNDROBIN, but if model-variant "
-                 "has been";
-    std::cout << " queried before, send to that worker." << std::endl;
-    std::cout
-        << "GPUSHARETRIGGER: Same as INFAAS_ALL but asks for a new VM when a";
-    std::cout << " GPU model is blacklisted" << std::endl;
-    std::cout
-        << "CPUBLISTCHECK: Same as GPUSHARETRIGGER, but will not choose CPU";
-    std::cout << " if a GPU model is running under the same parent"
-              << std::endl;
+    std::cout << "INFAAS_NOQPSLAT: Only consider if model is running, ";
+    std::cout << "not QPS/latency" << std::endl;
+    std::cout << "ROUNDROBIN: Pick machines in a round-robin fashion; ";
+    std::cout << "assumes model-variant is always provided" << std::endl;
+    std::cout << "ROUNDROBIN_STATIC: Same as ROUNDROBIN, but if ";
+    std::cout << "model-variant has been queried before, ";
+    std::cout << " send to that worker" << std::endl;
+    std::cout << "GPUSHARETRIGGER: Same as INFAAS_ALL, but asks for a ";
+    std::cout << "new VM when a GPU model is blacklisted" << std::endl;
+    std::cout << "CPUBLISTCHECK: Same as GPUSHARETRIGGER, but will not ";
+    std::cout << "choose CPU if a GPU model is running under the ";
+    std::cout << " same parent" << std::endl;
+    std::cout << "GPUSHARETRIGGER_SKIPBLIST: Same as GPUSHARETRIGGER, ";
+    std::cout << "but skips model blacklist check when selecting a worker";
+    std::cout << std::endl;
+    std::cout << "ROUNDROBIN_DYNAMIC: Same as ROUNDROBIN_STATIC, ";
+    std::cout << "but updates worker using round-robin if the ";
+    std::cout << "worker gets blacklisted" << std::endl;
     return 1;
   }
 
@@ -1692,7 +2043,10 @@ int main(int argc, char** argv) {
   }
   const int8_t decision_policy = std::stoi(argv[3]);
 
-  RunQueryFEServer(redis_addr, decision_policy);
+  int16_t slack_gpu = 0;
+  if (argc == 5) { slack_gpu = std::stoi(argv[4]); }
+
+  RunQueryFEServer(redis_addr, decision_policy, slack_gpu);
 
   return 0;
 }

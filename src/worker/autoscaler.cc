@@ -46,15 +46,16 @@ static const std::string trt_pbtxt_file = "config.pbtxt";
 // At least SLACK_SIZE replicas should be kept loaded.
 static const int CPU_SLACK_SIZE = 2;
 static const int GPU_SLACK_SIZE = 1;
-static const int GPU_MAX_REPLICAS = 1;
-static const int CPU_MAX_REPLICAS = 4;
+static int GPU_MAX_REPLICAS = 1;
+static const int CPU_MAX_REPLICAS = 2;
 // We can scale down if we get 10 continuous scale down requests.
-static const int GPU_SCALE_DOWN_DELAY = 90;
-static const int CPU_SCALE_DOWN_DELAY = 30;
+static int GPU_SCALE_DOWN_DELAY = 20;
+static const int CPU_SCALE_DOWN_DELAY = 10;
 // Need to change this to a dynamic value.
 static const double total_gpu_memory = 17179869184;
 
-static const double loadHeuristic = 0.0001;
+static const double loadHeuristic = 0.0002;
+static const double cpuHueristic = 0.05;
 static const double memorySlack = 1024.0;  // At least 1 GB of free memory.
 static const int TOP_K_FASTEST =
     10;  // We should consider top-10 fastest models.
@@ -183,11 +184,14 @@ int8_t checkModvar(const std::string& worker_name, const std::string& modvar,
   // Don't generate scaling request if the model is currently being loaded
   if (num_replicas > 0) {
     double single_throughput = 1000.0 / inf_lat * batch;
-    double weighted_qps =
-        mod_qps * actual_batch * num_replicas;  // Use the actual batch!
+    double weighted_qps = mod_qps * actual_batch;  // Use the actual batch!
     double weighted_curr = num_replicas * single_throughput;
     double wdelta_qps =
         weighted_qps - weighted_curr + loadHeuristic * weighted_curr * load_lat;
+    // Prevent CPU from scaling too fast.
+    if (hw == "CPU") {
+      wdelta_qps = weighted_qps - weighted_curr * (1 - cpuHueristic);
+    }
     *weighted_delta_qps = wdelta_qps;
     // Compute scale up & down
     // Scale up
@@ -242,7 +246,8 @@ void IndividualScaler(const std::string& worker_name,
     logfile << "[ " << curr_time << " ] Checking " << modvar << std::endl;
     res = checkModvar(worker_name, modvar, rmd, logfile, &batch,
                       &weighted_delta_qps, &hw, &load_lat, &framework, &count);
-    if ((res == 0) && count) {
+    // Ignore the error, just scale anyway.
+    if (count) {
       logfile << "Generating scale request for model " << modvar
               << ", count = " << count << std::endl;
       if (hw == "GPU") {
@@ -317,7 +322,7 @@ int8_t checkFastest(const std::string& worker_name,
   // Compute our formulas.
   double single_throughput = 1000.0 / inf_lat * batch;
   // Weighted qps needs to consider all other sum_weighted_delta_qps.
-  double weighted_qps = mod_qps * actual_batch * num_replicas + sum_wdelta_qps;
+  double weighted_qps = mod_qps * actual_batch + sum_wdelta_qps;
   double weighted_curr = num_replicas * single_throughput;
   int delta_plus = 0;
   // Scale up formula
@@ -329,9 +334,14 @@ int8_t checkFastest(const std::string& worker_name,
   // Scale down, we need to consider the downgrade model if we have one.
   double down_thresh = ((double)num_replicas - 1) * single_throughput;
   if (!trt_down_var.empty()) {
-    int down_batch =
-        std::min(std::stoi(rmd->get_model_info(trt_down_var, "max_batch")),
-                 MAX_ONLINE_BATCH);
+    auto down_hw = ChooseHardware(trt_down_var, rmd);
+    int down_batch = 1;
+    // We will use batch-1 for CPU models.
+    if (down_hw != "CPU") {
+      down_batch =
+          std::min(std::stoi(rmd->get_model_info(trt_down_var, "max_batch")),
+                   MAX_ONLINE_BATCH);
+    }
     double down_slope = std::stod(rmd->get_model_info(trt_down_var, "slope"));
     double down_intercept =
         std::stod(rmd->get_model_info(trt_down_var, "intercept"));
@@ -366,7 +376,11 @@ int8_t checkFastest(const std::string& worker_name,
       return -1;
     }
   } else {
-    if ((num_replicas > 0) && (weighted_qps <= std::max(0.0, down_thresh))) {
+    if ((num_replicas > 0) &&
+        ((weighted_qps <= std::max(0.0, down_thresh)) || (mod_qps <= 0.0)) &&
+        (actual_batch > 0)) {
+      // If the model has 0 QPS, then scale down.
+      // Only downgrade if the model is not newly loaded
       count = -1;
     } else {
       // Don't do anything.
@@ -404,7 +418,6 @@ void InfaasScaler(const std::string& worker_name,
     // we can upgrade to. Capped at MAX_ONLINE_BATCH. If the fastest variant is
     // not TensorRT model, ignore this step.
     fastest_var = fastest_models[0];
-    // TODO: this sometimes return a CPU model. Need a better way.
     auto fastest_framework = rmd->get_model_info(fastest_var, "framework");
     int trt_max_running_batch = 0;
     // the minimum not running batch that is larger than max_running_batch.
@@ -427,9 +440,19 @@ void InfaasScaler(const std::string& worker_name,
         }
       }
       // Then find the fastest_var we should upgrade.
+      // If we have no lower batch variant, set the downgrade var to the first
+      // CPU model.
+      std::string fastest_cpu_var = "";
       for (auto& modvar : fastest_models) {
         auto framework = rmd->get_model_info(modvar, "framework");
-        if (framework != "tensorrt") { continue; }
+        if (framework != "tensorrt") {
+          // Currently only consider TF CPU variant.
+          if (((framework == "tensorflow-cpu") || (framework == "pytorch")) &&
+              (fastest_cpu_var == "")) {
+            fastest_cpu_var = modvar;
+          }
+          continue;
+        }
         int mod_batch = std::stoi(rmd->get_model_info(modvar, "max_batch"));
         trt_batch.push_back(mod_batch);
         trt_batch2name[mod_batch] = modvar;
@@ -450,6 +473,9 @@ void InfaasScaler(const std::string& worker_name,
       } else {
         trt_prev_batch = *(--idxp);
         scaledown_fastest = trt_batch2name[trt_prev_batch];
+      }
+      if ((scaledown_fastest == "") && (fastest_cpu_var != "")) {
+        scaledown_fastest = fastest_cpu_var;
       }
     }
     logfile << "Curr running fastest variant is: " << curr_running_fastest
@@ -517,8 +543,15 @@ void InfaasScaler(const std::string& worker_name,
       if ((framework == "tensorrt") && (batch < trt_max_running_batch)) {
         logfile << "Force lower batch tensorrt model to unload: " << modvar
                 << std::endl;
+        // Note: what if the new variant is just loaded due to the
+        // downgrading? Before the higher batch variant is unloaded, this part
+        // will force the newly loaded variant to unload.
         count = -(GPU_SCALE_DOWN_DELAY * 100);
       }
+      // if ((hw == "CPU") && (trt_max_running_batch > 0)) {
+      //  logfile << "Force CPU model to unload: " << modvar << std::endl;
+      //  count = -(CPU_SCALE_DOWN_DELAY * 100);
+      //}
       if (count != 0) {
         individual_scale_info.push_back({modvar, count, load_lat, hw, ""});
       }
@@ -538,6 +571,8 @@ void InfaasScaler(const std::string& worker_name,
     res = checkFastest(worker_name, scaled_fastest, rmd, logfile, max_batch,
                        sum_wdelta_qps, scaledown_fastest, &fastest_hw,
                        &fastest_loadlat, &fastest_count);
+    logfile << "\t fastest_count: " << fastest_count
+            << "; fastest_hw: " << fastest_hw << std::endl;
     // 0 means individual scaling up, 1 means scaling the fastest version.
     int strategy = 0;
     if (fastest_hw == "CPU") {
@@ -567,10 +602,12 @@ void InfaasScaler(const std::string& worker_name,
           strategy = 1;
         }
         // Downgrade to prev model
-        if ((fastest_count < 0) && (trt_prev_batch > 0)) {
+        if ((fastest_count < 0) && (scaledown_fastest != "")) {
           logfile << "We will downgrade to lower batch model: "
                   << scaledown_fastest << std::endl;
-          strategy = 1;
+          // If we can downgrade, it means there is no need to upgrade CPU
+          // models.
+          strategy = 0;
         }
         // If we have a running fast model, no need to choose strategy a.
         if ((fastest_count == 0) && !curr_running_fastest.empty()) {
@@ -600,6 +637,20 @@ void InfaasScaler(const std::string& worker_name,
                 << "; count=" << count << std::endl;
         continue;
       }
+      // If this variant is the downgrade target, then don't unload this
+      // variant. Or if the variant is a CPU variant and the GPU batch-1 model
+      // is downgrading.
+      if ((count < -1) && (fastest_count < 0)) {
+        if ((modvar == scaledown_fastest) ||
+            ((hw == "CPU") && (trt_prev_batch < 1))) {
+          logfile << "The fastest variant is downgrading to: " << modvar
+                  << "; stop forcing scale down it. Set count=-1, ignore count="
+                  << count << std::endl;
+          // TODO: how to avoid oscillation from source?
+          count = -1;
+        }
+      }
+
       if (hw == "GPU") {
         res = Autoscaler::setScaleRequestGpu(modvar, count, down_var);
       } else if (hw == "CPU") {
@@ -649,6 +700,9 @@ void Autoscaler::AutoscalerArbiter(const std::string& worker_name,
         StaticScaler(worker_name, rmd, logfile);
         break;
       case AUTOSCALE_INDIVIDUAL:
+        // Enable 2 GPU instances.
+        GPU_MAX_REPLICAS = 2;
+        // GPU_SCALE_DOWN_DELAY = 60;
         IndividualScaler(worker_name, rmd, logfile);
         break;
       case AUTOSCALE_INFAAS:
@@ -734,6 +788,7 @@ int8_t Autoscaler::popScaleRequestCpu(ScaleRequest* reqs) {
 }
 
 void Autoscaler::GpuAutoscalerDaemon(const std::string& worker_name,
+                                     const AutoscalerType& atype,
                                      std::unique_ptr<RedisMetadata>& rmd,
                                      std::unique_ptr<Aws::S3::S3Client>& s3c) {
   // Log to the file "INFaaS/logs/gpu_autoscaler_daemon.log"
@@ -779,14 +834,21 @@ void Autoscaler::GpuAutoscalerDaemon(const std::string& worker_name,
       if (after_reps == 0) {
         if (!trt_down_var.empty()) {
           logfile << "Downgrading to " << trt_down_var << std::endl;
-          std::string model_url =
-              bucket_prefix + infaas_bucket + "/" + trt_down_var;
-          res = manager.LoadModel(model_url, trt_down_var, rmd, s3c);
-          if (res >= 0) {
-            logfile << "Loaded downgrade model " << trt_down_var << std::endl;
-          } else {
-            logfile << "Failed to load downgrade model " << trt_down_var
+
+          auto down_hw = ChooseHardware(trt_down_var, rmd);
+          if (down_hw == "CPU") {
+            logfile << "Will be handeled by parent scale down method."
                     << std::endl;
+          } else {
+            std::string model_url =
+                bucket_prefix + infaas_bucket + "/" + trt_down_var;
+            res = manager.LoadModel(model_url, trt_down_var, rmd, s3c);
+            if (res >= 0) {
+              logfile << "Loaded downgrade model " << trt_down_var << std::endl;
+            } else {
+              logfile << "Failed to load downgrade model " << trt_down_var
+                      << std::endl;
+            }
           }
         } else {
           logfile << "No model to downgrade to, unloading." << std::endl;
@@ -797,6 +859,7 @@ void Autoscaler::GpuAutoscalerDaemon(const std::string& worker_name,
             bucket_prefix + infaas_bucket + "/" + model_name;
         res = manager.LoadModel(model_url, model_name, rmd, s3c);
       } else if (after_reps > 0) {
+        // NOTE: multiple GPU replicas can cause bad performance.
         if (after_reps <= GPU_MAX_REPLICAS) {
           res = GpuModelManager::changeNumReplicas(model_name, after_reps);
         } else {
@@ -817,6 +880,7 @@ void Autoscaler::GpuAutoscalerDaemon(const std::string& worker_name,
 }
 
 void Autoscaler::CpuAutoscalerDaemon(const std::string& worker_name,
+                                     const AutoscalerType& atype,
                                      std::unique_ptr<RedisMetadata>& rmd,
                                      std::unique_ptr<Aws::S3::S3Client>& s3c) {
   // Log to the file "INFaaS/logs/cpu_autoscaler_daemon.log"
@@ -856,23 +920,29 @@ void Autoscaler::CpuAutoscalerDaemon(const std::string& worker_name,
       logfile << "Change from " << curr_reps << " to " << after_reps
               << std::endl;
       if (count > 0) {
-        // Load count models
-        for (int i = 0; i < count; ++i) {
-          std::string model_url =
-              bucket_prefix + infaas_bucket + "/" + model_name;
-          std::string container_name =
-              model_name + "_online_" + std::to_string(curr_reps + i);
-          logfile << "Loading " << container_name << std::endl;
-          auto res = manager.LoadModel(model_url, model_name, rmd, s3c,
-                                       container_name, true);
-          if (res < 0) {
-            logfile << "Failed to load " << container_name << std::endl;
-            // TODO: retry logic?
+        int after_reps = std::max(0, (int)(curr_reps + count));
+        if (after_reps > CPU_MAX_REPLICAS) {
+          logfile << "Exceeds maximum CPU replicas." << std::endl;
+        } else {
+          // Load count models
+          for (int i = 0; i < count; ++i) {
+            std::string model_url =
+                bucket_prefix + infaas_bucket + "/" + model_name;
+            std::string container_name =
+                model_name + "_online_" + std::to_string(curr_reps + i);
+            logfile << "Loading " << container_name << std::endl;
+            auto res = manager.LoadModel(model_url, model_name, rmd, s3c,
+                                         container_name, true);
+            if (res < 0) {
+              logfile << "Failed to load " << container_name << std::endl;
+              // TODO: retry logic?
+            }
           }
         }
       } else if (count < 0) {
-        // Unload count models
-        for (int i = 1; i <= -count; ++i) {
+        int to_unload = std::min(-count, (int)curr_reps);
+        // Unload count models in reverse order
+        for (int i = 1; i <= to_unload; ++i) {
           std::string container_name =
               model_name + "_online_" + std::to_string(curr_reps - i);
           logfile << "Unloading " << container_name << std::endl;

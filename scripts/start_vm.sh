@@ -74,13 +74,13 @@ else
 
     count=0
     while [[ "running" != "${state}" ]]; do
-      sleep 2
       state=`aws ec2 describe-instances --filters Name=tag:Name,Values=${EXECUTOR_NAME} --query 'Reservations[*].Instances[*].State.Name' --output text`
       count=$[${count}+1]
       if [[ ${count} == ${MAX_TRY} ]]; then
         echo "MAX LIMIT REACHED!"
         exit 1
       fi
+      sleep 2
     done
   fi
 fi

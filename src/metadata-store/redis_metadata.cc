@@ -131,6 +131,10 @@ int8_t RedisMetadata::set_exec_onlycpu(const std::string& executor_name) {
   //// during decision-making
   if (update_gpu_util(executor_name, 101.0, 0) == -1) { return -1; }
 
+  // Increment the CPU executor counter
+  Command<int>& c_numcpuexec = rdx_.commandSync<int>({"INCR", CPUEXEC_KEY});
+  if (!c_numcpuexec.ok()) { return -1; }
+
   return 0;
 }
 
@@ -149,6 +153,46 @@ int8_t RedisMetadata::is_exec_onlycpu(const std::string& executor_name) {
   } else {
     return 0;
   }
+}
+
+int8_t RedisMetadata::set_exec_slack(const std::string& executor_name,
+                                     const std::string& model_variant) {
+  // Check that executor exists
+  if (!key_exists(executor_name)) {
+    std::cout << "[Redis Metadata]: " << executor_name << " does not exist"
+              << std::endl;
+    return -1;
+  }
+  const std::string exec_slack = executor_name + "-" + SLACK_SUFF;
+
+  // Default is 0. Otherwise, set to the variant that is running on it
+  Command<std::string>& c_exec_slack =
+      rdx_.commandSync<std::string>({"SET", exec_slack, model_variant});
+  if (!c_exec_slack.ok()) { return -1; }
+
+  return 0;
+}
+
+std::string RedisMetadata::is_exec_slack(const std::string& executor_name) {
+  // Check that executor exists
+  if (!key_exists(executor_name)) {
+    std::cout << "[Redis Metadata]: " << executor_name << " does not exist"
+              << std::endl;
+    return "FAIL";
+  }
+
+  const std::string exec_slack = executor_name + "-" + SLACK_SUFF;
+
+  // If key doesn't exist, it is not slack
+  if (!key_exists(exec_slack)) { return "NS"; }
+
+  Command<std::string>& c_exec_slack =
+      rdx_.commandSync<std::string>({"GET", exec_slack});
+  if (!c_exec_slack.ok()) { return "FAIL"; }
+
+  std::string reply = c_exec_slack.reply();
+
+  return reply;
 }
 
 int8_t RedisMetadata::executor_exists(const std::string& executor_name) {
@@ -225,6 +269,30 @@ int8_t RedisMetadata::vm_scale_status() {
   return reply;
 }
 
+int8_t RedisMetadata::set_slack_scale() {
+  Command<std::string>& c_slackscale =
+      rdx_.commandSync<std::string>({"SET", SLACKSCALE_KEY, "1"});
+  if (!c_slackscale.ok()) { return -1; }
+  return 0;
+}
+
+int8_t RedisMetadata::unset_slack_scale() {
+  Command<std::string>& c_slackscale =
+      rdx_.commandSync<std::string>({"SET", SLACKSCALE_KEY, "0"});
+  if (!c_slackscale.ok()) { return -1; }
+  return 0;
+}
+
+int8_t RedisMetadata::slack_scale_status() {
+  Command<std::string>& c_slackscale =
+      rdx_.commandSync<std::string>({"GET", SLACKSCALE_KEY});
+  if (!c_slackscale.ok()) { return -1; }
+
+  int8_t reply = std::stoi(c_slackscale.reply());
+
+  return reply;
+}
+
 int8_t RedisMetadata::delete_executor(const std::string& executor_name) {
   // Delete executor-address
   Command<int>& c_exec_del = rdx_.commandSync<int>({"DEL", executor_name});
@@ -235,6 +303,17 @@ int8_t RedisMetadata::delete_executor(const std::string& executor_name) {
   if (is_exec_onlycpu(executor_name)) {
     Command<int>& c_exec_cpu_del = rdx_.commandSync<int>({"DEL", exec_cpu});
     if (!c_exec_cpu_del.ok()) { return -1; }
+
+    // Decrement the CPU executor counter
+    Command<int>& c_numcpuexec = rdx_.commandSync<int>({"DECR", CPUEXEC_KEY});
+    if (!c_numcpuexec.ok()) { return -1; }
+  }
+
+  // Delete slack key if applicable
+  const std::string exec_slack = executor_name + "-" + SLACK_SUFF;
+  if (key_exists(executor_name)) {
+    Command<int>& c_exec_slack_del = rdx_.commandSync<int>({"DEL", exec_slack});
+    if (!c_exec_slack_del.ok()) { return -1; }
   }
 
   // Delete from CPU utilization sorted set
@@ -286,6 +365,19 @@ int16_t RedisMetadata::get_num_executors() {
   long long int numexec_reply = c_numexec.reply();
 
   return (int16_t)numexec_reply;
+}
+
+int16_t RedisMetadata::get_num_cpu_executors() {
+  // Check if CPUEXEC_KEY exists. If not, there are no CPU executors
+  if (!key_exists(CPUEXEC_KEY)) { return 0; }
+
+  Command<std::string>& c_numcpuexec =
+      rdx_.commandSync<std::string>({"GET", CPUEXEC_KEY});
+  if (!c_numcpuexec.ok()) { return -1; }
+
+  int8_t reply = std::stoi(c_numcpuexec.reply());
+
+  return reply;
 }
 
 std::vector<std::string> RedisMetadata::get_all_executors() {
@@ -513,7 +605,7 @@ std::vector<std::string> RedisMetadata::get_all_running_models() {
   Command<std::vector<std::string>>& c_runmod_set =
       rdx_.commandSync<std::vector<std::string>>({"SMEMBERS", RUNMODS_SET});
   if (!c_runmod_set.ok()) {
-    return {};
+    return {};  // TODO: return more valid error
   }
 
   std::vector<std::string> reply = c_runmod_set.reply();
@@ -527,10 +619,10 @@ double RedisMetadata::get_load_lat(const std::string& model_name) {
 
   // Get parent model
   std::string parent_model = get_parent_model(model_name);
-  const std::string model_acc_name = parent_model + ACCURACY_SUFF;
+  const std::string load_lat_name = parent_model + LOADLAT_SUFF;
 
   Command<std::string>& c_load_lat_sset =
-      rdx_.commandSync<std::string>({"ZSCORE", model_acc_name, model_name});
+      rdx_.commandSync<std::string>({"ZSCORE", load_lat_name, model_name});
   if (!c_load_lat_sset.ok()) { return -1.0; }
   std::string reply = c_load_lat_sset.reply();
 
@@ -857,6 +949,15 @@ int8_t RedisMetadata::remove_running_model(const std::string& executor_name,
     if (!c_del_parent_child.ok()) { return -1; }
   }
 
+  // If it was an exclusive model, reset
+  if (is_exec_slack(executor_name) == model_name) {
+    if (set_exec_slack(executor_name) != 0) {
+      std::cout << "[Redis Metadata]: failed to reset slack for ";
+      std::cout << executor_name << std::endl;
+      return -1;
+    }
+  }
+
   return 0;
 }
 
@@ -939,7 +1040,7 @@ std::vector<std::string> RedisMetadata::get_parent_models_on_executor(
   Command<std::vector<std::string>>& c_execmod_set =
       rdx_.commandSync<std::vector<std::string>>({"SMEMBERS", exec_mod_name});
   if (!c_execmod_set.ok()) {
-    return {};
+    return {};  // TODO: return more valid error
   }
 
   std::vector<std::string> reply = c_execmod_set.reply();
@@ -953,7 +1054,7 @@ std::vector<std::string> RedisMetadata::get_variants_on_executor(
   Command<std::vector<std::string>>& c_execmvar_set =
       rdx_.commandSync<std::vector<std::string>>({"SMEMBERS", exec_mvar_name});
   if (!c_execmvar_set.ok()) {
-    return {};
+    return {};  // TODO: return more valid error
   }
 
   std::vector<std::string> reply = c_execmvar_set.reply();
@@ -1071,7 +1172,7 @@ std::vector<std::string> RedisMetadata::min_qps_name(
     const std::string& model_name, const int8_t& max_results) {
   // Check if model variant exists
   if (!modelvar_exists(model_name)) {
-    return {};
+    return {};  // TODO: return more valid error
   }
 
   // Check if model is running.
@@ -1093,7 +1194,7 @@ std::vector<std::string> RedisMetadata::min_qps_name(
 double RedisMetadata::get_min_qps(const std::string& model_name) {
   // Check if model variant exists
   if (!modelvar_exists(model_name)) {
-    return -1.0;
+    return -1.0;  // TODO: return more valid error
   }
 
   // Check if model is running. If not, return empty_addr

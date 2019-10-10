@@ -118,6 +118,15 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  // Test retrieving number of CPU executors
+  int16_t number_of_cpu_executors = rmd.get_num_cpu_executors();
+  if (number_of_cpu_executors == 0) {
+    PASS("Number of CPU executors (not yet set)");
+  } else {
+    FAIL("Number of CPU executors (not yet set)");
+    return 1;
+  }
+
   // Test getting a list of all the executors
   std::vector<std::string> all_exec = rmd.get_all_executors();
   if (all_exec.size() > 0) {
@@ -185,6 +194,44 @@ int main(int argc, char** argv) {
     PASS("No longer blacklisted");
   } else {
     FAIL("No longer blacklisted");
+    return 1;
+  }
+
+  // Check if executor is slack before setting it
+  std::string not_slack = rmd.is_exec_slack(sample_exec[0]);
+  if (not_slack == "NS") {
+    PASS("Not slack executor");
+  } else {
+    FAIL("Not slack executor");
+    return 1;
+  }
+
+  // Test setting an executor as slack with no running variant
+  rc = rmd.set_exec_slack(sample_exec[0]);
+  if (!rc) {
+    PASS("Slack executor, no running variant");
+  } else {
+    FAIL("Slack executor, no running variant");
+    return 1;
+  }
+
+  // Check if executor is slack, should return 0 indicating no running variant
+  std::string empty_variant = rmd.is_exec_slack(sample_exec[0]);
+  if (empty_variant == "0") {
+    PASS("Slack executor check, no running variant");
+  } else {
+    FAIL("Slack executor check, no running variant");
+    return 1;
+  }
+
+  // Set executor to be slack with a running variant.
+  // Then check to see that it is slack with "testmodel" running on it
+  rc = rmd.set_exec_slack(sample_exec[0], "testmodel");
+  std::string actual_variant = rmd.is_exec_slack(sample_exec[0]);
+  if (actual_variant == "testmodel") {
+    PASS("Slack executor check, with running variant");
+  } else {
+    FAIL("Slack executor check, with running variant");
     return 1;
   }
 
@@ -342,6 +389,16 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  // Test getting a model's loading latency
+  double retrieve_load_lat = rmd.get_load_lat(test_mod_variant.model_name);
+  if (retrieve_load_lat == test_mod_variant.load_lat) {
+    PASS("Retrieve loading latency");
+  } else {
+    FAIL("Retrieve loading latency");
+    return 1;
+  }
+
+  // Test getting a model's inference latency
   start = std::chrono::high_resolution_clock::now();
   double retrieve_inf_lat = rmd.get_inf_lat(test_mod_variant.model_name);
   stop = std::chrono::high_resolution_clock::now();
@@ -458,6 +515,15 @@ int main(int argc, char** argv) {
     PASS("CPU-only worker utilization");
   } else {
     FAIL("CPU-only worker utilization");
+    return 1;
+  }
+
+  // Now check the number of CPU executors
+  int16_t number_of_cpu_executors_afterset = rmd.get_num_cpu_executors();
+  if (number_of_cpu_executors_afterset == 1) {
+    PASS("Number of CPU executors (after set)");
+  } else {
+    FAIL("Number of CPU executors (after set)");
     return 1;
   }
 

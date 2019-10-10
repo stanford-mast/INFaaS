@@ -19,6 +19,9 @@ declare -a BATCH=(
 1
 4
 8
+16
+32
+64
 )
 
 FROZEN_MODEL=$1
@@ -171,7 +174,7 @@ if [[ $TASK == "classification" ]]; then
     # Create and convert test image
   if [[ $framework == "pytorch"  ]] || [[ $framework == "tensorflow-cpu" ]]; then
     convert -resize ${im_dim}x${im_dim}! ${TEST_IMAGE} resized_img.jpg
-    b64image=`./img_to_base64.py resized_img.jpg`
+    b64image=`python3 img_to_base64.py resized_img.jpg`
     b64image=`echo ${b64image} | cut -d "'" -f 2`
   fi
 fi
@@ -180,6 +183,9 @@ load_time=0
 inftimeb1=0
 inftimeb4=0
 inftimeb8=0
+inftimeb16=0
+inftimeb32=0
+inftimeb64=0
 max_mem=0
 
 # This script assumes the latest docker containers for the TensorRT Server, TensorFlow Serving,
@@ -254,27 +260,60 @@ if [[ $framework == "tensorrt" ]] || [[ $framework == "tensorflow-gpu" ]] || \
   if [ $max_batch == 1 ]; then
     inftimeb4=0
     inftimeb8=0
-  elif [ $max_batch -le 4 ]; then
+    inftimeb16=0
+    inftimeb32=0
+    inftimeb64=0
+  fi
+  if [ $max_batch -ge 4 ]; then
     # Get batch 4
     $SCRIPT_DIR/../../build/bin/trtis_perf_client -b4 -t1 -p${TRTPROFILEWINDOW} -m${var_mod} > temp.out
     inftimeb4=`grep "Avg latency" temp.out | awk -v N=3 '{print $3}'`
     inftimeb4=$( echo "$inftimeb4 / 1000" | bc -l ) # us -> ms
     inftimeb8=0
-  else
-    # Get batch 4
-    $SCRIPT_DIR/../../build/bin/trtis_perf_client -b4 -t1 -p${TRTPROFILEWINDOW} -m${var_mod} > temp.out
-    inftimeb4=`grep "Avg latency" temp.out | awk -v N=3 '{print $3}'`
-    inftimeb4=$( echo "$inftimeb4 / 1000" | bc -l ) # us -> ms
-
+    inftimeb16=0
+    inftimeb32=0
+    inftimeb64=0
+  fi
+  if [ $max_batch -ge 8 ]; then
     # Get batch 8
     $SCRIPT_DIR/../../build/bin/trtis_perf_client -b8 -t1 -p${TRTPROFILEWINDOW} -m${var_mod} > temp.out
     inftimeb8=`grep "Avg latency" temp.out | awk -v N=3 '{print $3}'`
     inftimeb8=$( echo "$inftimeb8/ 1000" | bc -l ) # us -> ms
+
+    inftimeb16=0
+    inftimeb32=0
+    inftimeb64=0
+  fi
+  if [ $max_batch -ge 16 ]; then
+    # Get batch 16
+    $SCRIPT_DIR/../../build/bin/trtis_perf_client -b16 -t1 -p${TRTPROFILEWINDOW} -m${var_mod} > temp.out
+    inftimeb16=`grep "Avg latency" temp.out | awk -v N=3 '{print $3}'`
+    inftimeb16=$( echo "$inftimeb16/ 1000" | bc -l ) # us -> ms
+
+    inftimeb32=0
+    inftimeb64=0
+  fi
+  if [ $max_batch -ge 32 ]; then
+    # Get batch 32
+    $SCRIPT_DIR/../../build/bin/trtis_perf_client -b32 -t1 -p${TRTPROFILEWINDOW} -m${var_mod} > temp.out
+    inftimeb32=`grep "Avg latency" temp.out | awk -v N=3 '{print $3}'`
+    inftimeb32=$( echo "$inftimeb32/ 1000" | bc -l ) # us -> ms
+
+    inftimeb64=0
+  fi
+  if [ $max_batch -ge 64 ]; then
+    # Get batch 64
+    $SCRIPT_DIR/../../build/bin/trtis_perf_client -b64 -t1 -p${TRTPROFILEWINDOW} -m${var_mod} > temp.out
+    inftimeb64=`grep "Avg latency" temp.out | awk -v N=3 '{print $3}'`
+    inftimeb64=$( echo "$inftimeb64/ 1000" | bc -l ) # us -> ms
   fi
 
   echo "Inference time (B1): "$inftimeb1
   echo "Inference time (B4): "$inftimeb4
   echo "Inference time (B8): "$inftimeb8
+  echo "Inference time (B16): "$inftimeb16
+  echo "Inference time (B32): "$inftimeb32
+  echo "Inference time (B64): "$inftimeb64
 
   echo "Memory: "${max_mem}" bytes"
 
@@ -357,6 +396,12 @@ elif [[ $framework == "pytorch" ]]; then
         inftimeb4=$( echo "$curr_run + $inftimeb4" | bc -l )
       elif [[ $b == 8 ]]; then
         inftimeb8=$( echo "$curr_run + $inftimeb8" | bc -l )
+      elif [[ $b == 16 ]]; then
+        inftimeb16=$( echo "$curr_run + $inftimeb16" | bc -l )
+      elif [[ $b == 32 ]]; then
+        inftimeb32=$( echo "$curr_run + $inftimeb32" | bc -l )
+      elif [[ $b == 64 ]]; then
+        inftimeb64=$( echo "$curr_run + $inftimeb64" | bc -l )
       fi
 
     done
@@ -364,9 +409,15 @@ elif [[ $framework == "pytorch" ]]; then
   inftimeb1=$( echo "$inftimeb1 / 3 * 1000" | bc -l )
   inftimeb4=$( echo "$inftimeb4 / 3 * 1000" | bc -l )
   inftimeb8=$( echo "$inftimeb8 / 3 * 1000" | bc -l )
+  inftimeb16=$( echo "$inftimeb16 / 3 * 1000" | bc -l )
+  inftimeb32=$( echo "$inftimeb32 / 3 * 1000" | bc -l )
+  inftimeb64=$( echo "$inftimeb64 / 3 * 1000" | bc -l )
   echo "Inference time (B1): "$inftimeb1
   echo "Inference time (B4): "$inftimeb4
   echo "Inference time (B8): "$inftimeb8
+  echo "Inference time (B16): "$inftimeb16
+  echo "Inference time (B32): "$inftimeb32
+  echo "Inference time (B64): "$inftimeb64
 
   ### Cleanup
   # Remove temporary file
@@ -488,15 +539,28 @@ elif [[ $framework == "tensorflow-cpu" ]] && [[ $TASK == "classification" ]]; th
         inftimeb4=$( echo "$curr_run + $inftimeb4" | bc -l )
       elif [[ $b == 8 ]]; then
         inftimeb8=$( echo "$curr_run + $inftimeb8" | bc -l )
+      elif [[ $b == 16 ]]; then
+        inftimeb16=$( echo "$curr_run + $inftimeb16" | bc -l )
+      elif [[ $b == 32 ]]; then
+        inftimeb32=$( echo "$curr_run + $inftimeb32" | bc -l )
+      elif [[ $b == 64 ]]; then
+        inftimeb64=$( echo "$curr_run + $inftimeb64" | bc -l )
       fi
+
     done
   done
   inftimeb1=$( echo "$inftimeb1 / 3 * 1000" | bc -l )
   inftimeb4=$( echo "$inftimeb4 / 3 * 1000" | bc -l )
   inftimeb8=$( echo "$inftimeb8 / 3 * 1000" | bc -l )
+  inftimeb16=$( echo "$inftimeb16 / 3 * 1000" | bc -l )
+  inftimeb32=$( echo "$inftimeb32 / 3 * 1000" | bc -l )
+  inftimeb64=$( echo "$inftimeb64 / 3 * 1000" | bc -l )
   echo "Inference time (B1): "$inftimeb1
   echo "Inference time (B4): "$inftimeb4
   echo "Inference time (B8): "$inftimeb8
+  echo "Inference time (B16): "$inftimeb16
+  echo "Inference time (B32): "$inftimeb32
+  echo "Inference time (B64): "$inftimeb64
 
   ### Cleanup
   # Remove temporary file
@@ -601,15 +665,28 @@ elif [[ $framework == "tensorflow-cpu" ]] && [[ $TASK == "translation" ]]; then
         inftimeb4=$( echo "$curr_run + $inftimeb4" | bc -l )
       elif [[ $b == 8 ]]; then
         inftimeb8=$( echo "$curr_run + $inftimeb8" | bc -l )
+      elif [[ $b == 16 ]]; then
+        inftimeb16=$( echo "$curr_run + $inftimeb16" | bc -l )
+      elif [[ $b == 32 ]]; then
+        inftimeb32=$( echo "$curr_run + $inftimeb32" | bc -l )
+      elif [[ $b == 64 ]]; then
+        inftimeb64=$( echo "$curr_run + $inftimeb64" | bc -l )
       fi
+
     done
   done
   inftimeb1=$( echo "$inftimeb1 / 3 * 1000" | bc -l )
   inftimeb4=$( echo "$inftimeb4 / 3 * 1000" | bc -l )
   inftimeb8=$( echo "$inftimeb8 / 3 * 1000" | bc -l )
+  inftimeb16=$( echo "$inftimeb16 / 3 * 1000" | bc -l )
+  inftimeb32=$( echo "$inftimeb32 / 3 * 1000" | bc -l )
+  inftimeb64=$( echo "$inftimeb64 / 3 * 1000" | bc -l )
   echo "Inference time (B1): "$inftimeb1
   echo "Inference time (B4): "$inftimeb4
   echo "Inference time (B8): "$inftimeb8
+  echo "Inference time (B16): "$inftimeb16
+  echo "Inference time (B32): "$inftimeb32
+  echo "Inference time (B64): "$inftimeb64
 
   ### Cleanup
   # Remove temporary file
@@ -668,6 +745,15 @@ sed -i "s|<INFLATB4>|$inftimeb4|g" ${model_config_name}
 
 # Add inference latency (B8)
 sed -i "s|<INFLATB8>|$inftimeb8|g" ${model_config_name}
+
+# Add inference latency (B16)
+sed -i "s|<INFLATB16>|$inftimeb16|g" ${model_config_name}
+
+# Add inference latency (B32)
+sed -i "s|<INFLATB32>|$inftimeb32|g" ${model_config_name}
+
+# Add inference latency (B64)
+sed -i "s|<INFLATB64>|$inftimeb64|g" ${model_config_name}
 
 # Add accuracy
 sed -i "s|<ACCURACY>|$ACCURACY|g" ${model_config_name}

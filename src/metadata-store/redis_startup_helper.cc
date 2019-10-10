@@ -28,11 +28,12 @@
 int main(int argc, char** argv) {
   // We don't need to check for a valid address since this has already been
   // checked by the startup script that calls this program
-  if (argc < 7) {
+  if (argc < 8) {
     std::cerr << "Usage: ./redis_startup_helper <redis-ip> <redis-port> ";
-    std::cerr << "<worker-name> <worker-ip> <worker-port> <is-cpu> [<instid>]"
-              << std::endl;
+    std::cerr << "<worker-name> <worker-ip> <worker-port> <is-cpu> ";
+    std::cerr << "<is-slack> [<instid>]" << std::endl;
     std::cerr << "is-cpu: 1 if is CPU only" << std::endl;
+    std::cerr << "is-slack: 1 if is slack GPU" << std::endl;
     std::cerr << "instid is only required if running on AWS" << std::endl;
     return 1;
   }
@@ -43,6 +44,7 @@ int main(int argc, char** argv) {
   std::string worker_ip = argv[4];
   std::string worker_port = argv[5];
   int is_cpu = std::stoi(argv[6]);
+  int is_slack = std::stoi(argv[7]);
 
   RedisMetadata rmd({redis_ip, redis_port});
 
@@ -61,9 +63,17 @@ int main(int argc, char** argv) {
     }
   }
 
+  // Set to is-slack only if applicable
+  if (is_slack) {
+    if (rmd.set_exec_slack(worker_name)) {
+      std::cerr << "Failed to set worker as slack!" << std::endl;
+      return 1;
+    }
+  }
+
   // Add instance-id as well
-  if (argc == 8) {
-    std::string instid = argv[7];
+  if (argc == 9) {
+    std::string instid = argv[8];
     if (rmd.add_executor_instid(worker_name, instid)) {
       std::cerr << "Failed to add worker's instance-id in startup helper!"
                 << std::endl;

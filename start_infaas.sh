@@ -1,5 +1,4 @@
 #!/bin/bash
-
 set -ex
 
 ### General variables ###
@@ -9,11 +8,16 @@ CMAKE_VERSION='3.7'
 LOG_DIR=${INFAAS_HOME}"/logs/master_logs/" # Logging directory for Master
 MASTER_IP=`curl -s http://169.254.169.254/latest/meta-data/local-ipv4` # IP of the machine that runs this script
 
-### Modes and knobs, mostly for experiments. Defaults should be sufficient for most users ###
+### Modes ###
+# Different modes used to configure INFaaS like other existing systems.
+# Defaults should be sufficient for most users, but more details
+## about each can be found by running ./queryfe_server with no inputs
+
 # Master Decision Mode
-# For experiments, use 0,3,5
 # 0: INFAAS_ALL, 1: INFAAS_NOQPSLAT, 2: ROUNDROBIN,
-## 3: ROUNDROBIN_STATIC, 4: GPUSHARETRIGGER, 5: CPUBLISTCHECK
+## 3: ROUNDROBIN_STATIC, 4: GPUSHARETRIGGER,
+## 5: CPUBLISTCHECK, 6: GPUSHARETRIGGER_SKIPBLIST,
+## 7: ROUNDROBIN_DYNAMIC
 MASTER_DECISION_MODE="5"
 
 # Whether to use VM_DAEMON or not. ON: true, OFF: false
@@ -24,20 +28,25 @@ VM_DAEMON_MODE="ON"
 WORKER_AUTOSCALER="3"  # 0: NONE, 1: Static, 2: Individual, 3: INFaaS
 
 # Utilization threshold and maximum number of tries when running this script
-MAX_TRY=40  # At most try 40 times
-UTIL_THRESH=50 # Utilization threshold (out of 100)
+MAX_TRY=40  # Number of tries before failing to setup
+UTIL_THRESH=80 # Utilization threshold (out of 100)
 
 ###### UPDATE THESE VALUES BEFORE RUNNING ######
 REGION='<REGION>'
 ZONE='<ZONE>'
 SECURITY_GROUP='<SECURITYGROUP>'
 IAM_ROLE='<IAMROLE>'
-MODELDB='<MYMODELDB>'
-CONFIGDB='<MYCONFIG>'
-WORKER_IMAGE='<INFAASAMI>'
+MODELDB='<MYMODELDB>' # Model repository bucket (do not include s3://)
+CONFIGDB='<MYCONFIGDB>' # Configuration bucket (do not include s3://)
+WORKER_IMAGE='ami-<INFAASAMI>'
 NUM_INIT_CPU_WORKERS=1
 NUM_INIT_GPU_WORKERS=0
-MAX_WORKERS=5 # Used for VM daemon to avoid unstable behavior
+MAX_CPU_WORKERS=1
+MAX_GPU_WORKERS=0
+# Used for making popular GPU variants exclusive
+# Set to 0 for no GPU to be used as exclusive
+# IMPORTANT: if NUM_INIT_GPU_WORKERS > 0, SLACK_GPU should be less than this (i.e. at least one GPU should be available for sharing)
+SLACK_GPU=0
 KEY_NAME='worker_key'
 MACHINE_TYPE_GPU='p3.2xlarge'
 MACHINE_TYPE_CPU='m5.2xlarge'
@@ -45,7 +54,7 @@ DELETE_MACHINES='2' # 0: VM daemon stops machines; 1: VM daemon deletes machines
 
 ### Values for VMs that don't need user configuration ###
 MIN_WORKERS=$[$NUM_INIT_CPU_WORKERS + $NUM_INIT_GPU_WORKERS] # Used for VM daemon
-EXECUTOR_PREFIX='infaas-worker'
+EXECUTOR_PREFIX='iwf'
 EXECUTOR_PORT='50051'
 STARTUP_SCRIPT='/opt/INFaaS/src/worker/start_worker.sh'
 
@@ -54,7 +63,7 @@ STARTUP_SCRIPT='/opt/INFaaS/src/worker/start_worker.sh'
 
 echo "=============Welcome to INFaaS============="
 echo ""
-
+echo "Executing setup script"
 
 # Check if user has put in their credentials via aws configure
 if [ ! -f ${HOME}/.aws/credentials ]; then
@@ -233,7 +242,8 @@ else
     # Register worker in shared memory (both IP and instance-id)
     worker_inst_id=`aws ec2 describe-instances --filters Name=tag:Name,Values=${next_executor_name} --query 'Reservations[*].Instances[*].InstanceId' --output text`
     build/bin/redis_startup_helper localhost ${REDIS_PORT} ${next_executor_name} \
-                                   ${exec_ip} ${EXECUTOR_PORT} "1" ${worker_inst_id}
+                                   ${exec_ip} ${EXECUTOR_PORT} "1" "0" \
+                                   ${worker_inst_id}
   done
 fi
 
@@ -241,6 +251,7 @@ fi
 if [[ $[${NUM_INIT_GPU_WORKERS}] -le 0 ]]; then
   echo "NO GPU Workers!"
 else
+  slack_gpu_counter=${SLACK_GPU}
   actual_num_init_gpu=$[$NUM_INIT_GPU_WORKERS-1] # Subtract one since we enumerate from zero
   for iworker in $( eval echo {0..$actual_num_init_gpu} ); do
     next_executor_name=${EXECUTOR_PREFIX}"-gpu-"${iworker}
@@ -280,8 +291,17 @@ else
 
     # Register worker in shared memory (both IP and instance-id)
     worker_inst_id=`aws ec2 describe-instances --filters Name=tag:Name,Values=${next_executor_name} --query 'Reservations[*].Instances[*].InstanceId' --output text`
+
+    # Make slack if necessary
+    is_slack="0"
+    if [[ ${slack_gpu_counter} -gt 0 ]]; then
+      is_slack="1"
+      slack_gpu_counter=$[$slack_gpu_counter-1]
+      echo "Executor "${next_executor_name}" is slack"
+    fi
     build/bin/redis_startup_helper localhost ${REDIS_PORT} ${next_executor_name} \
-                                   ${exec_ip} ${EXECUTOR_PORT} "0" ${worker_inst_id}
+                                   ${exec_ip} ${EXECUTOR_PORT} "0" ${is_slack} \
+                                   ${worker_inst_id}
   done
 fi
 
@@ -336,8 +356,8 @@ if [[ "${VM_DAEMON_MODE}" == "ON" ]]; then
                              ${STARTUP_SCRIPT} ${SECURITY_GROUP} \
                              ${MAX_TRY} ${IAM_ROLE} ${EXECUTOR_PORT} \
                              ${EXECUTOR_PREFIX} ${MIN_WORKERS} \
-                             ${MAX_WORKERS} ${MASTER_IP} \
-                             ${WORKER_AUTOSCALER} \
+                             ${MAX_CPU_WORKERS} ${MAX_GPU_WORKERS} \
+                             ${MASTER_IP} ${WORKER_AUTOSCALER} \
                              ${DELETE_MACHINES} >${VMDAEMON_LOG} 2>&1 &
   echo "Master VM daemon successfully launched"
 else

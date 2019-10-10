@@ -30,6 +30,7 @@
 #include <aws/s3/S3Client.h>
 #include <aws/s3/model/CopyObjectRequest.h>
 #include <aws/s3/model/GetObjectRequest.h>
+#include <aws/s3/model/HeadObjectRequest.h>
 #include <aws/s3/model/ListObjectsV2Request.h>
 #include <aws/s3/model/Object.h>
 
@@ -207,7 +208,7 @@ private:
     // Copy model
     if (complete_source == complete_destination) {
       // Skip if same
-      std::cout << "Skip copying because the source == destination"
+      std::cout << "[LOG]: Skip copying because the source == destination"
                 << std::endl;
     } else {
       Aws::S3::Model::ListObjectsV2Request list_request;
@@ -238,7 +239,7 @@ private:
                       << error.GetMessage() << std::endl;
 
             rs->set_status(RequestReplyEnum::INVALID);
-            rs->set_msg("Failed to copy model");
+            rs->set_msg("Error when trying to copy model");
             return Status::OK;
           }
         }
@@ -246,8 +247,28 @@ private:
         auto error = list_objects_outcome.GetError();
         std::cout << "ERROR: " << error.GetExceptionName() << ": "
                   << error.GetMessage() << std::endl;
+
+        rs->set_status(RequestReplyEnum::INVALID);
+        rs->set_msg("Bucket not found!");
+        return Status::OK;
       }
-      std::cout << "Successfully copied" << std::endl;
+
+      Aws::S3::Model::HeadObjectRequest check_request;
+      check_request.WithBucket(destination_bucket).WithKey(destination_object);
+      auto check_outcome = s3_client.HeadObject(check_request);
+      if (check_outcome.IsSuccess()) {
+        std::cout << "[LOG]: Successfully copied" << std::endl;
+      } else {
+        std::cout << "[LOG]: Model path probably wrong..." << std::endl;
+        auto error = check_outcome.GetError();
+        std::cout << "ERROR: " << error.GetExceptionName() << ": "
+                  << error.GetMessage() << std::endl;
+
+        rs->set_status(RequestReplyEnum::INVALID);
+        rs->set_msg(
+            "Model not copied successfully. Model path likely invalid!");
+        return Status::OK;
+      }
     }
 
     // Create grandparent model if needed

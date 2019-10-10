@@ -20,6 +20,7 @@
  * SOFTWARE.
  */
 
+#include <ctype.h>
 #include <unistd.h>
 #include <array>
 #include <chrono>  // time_since_epoch
@@ -56,12 +57,13 @@ enum INSTANCETYPE { CPU = 0, GPU = 1 };
 // Constants
 static const int MAX_GRPC_MESSAGE_SIZE = INT32_MAX;
 
-const int32_t sleep_seconds = 2e6;  // 1e6 = 1sec
+const int32_t sleep_seconds = 2e6;          // 1e6 = 1sec
+const int32_t respond_sleep_seconds = 1e6;  // 1e6 = 1sec
 const int16_t num_iter = 15;
 const double cpu_shutdown_min = 5.0;
-const double gpu_shutdown_min = 10.0;
-const double avg_cpu_shutdown_min = 30;
-const double avg_gpu_shutdown_min = 10;
+const double gpu_shutdown_min = 8.0;
+const double avg_cpu_shutdown_min = 30.0;
+const double avg_gpu_shutdown_min = 8.0;
 const double max_blacklist = 80.0;
 
 int16_t vm_backoff_counter;
@@ -73,15 +75,13 @@ std::string stop_script = "scripts/stop_worker.sh";
 std::string start_vm_script = "scripts/start_vm.sh";
 
 int main(int argc, char** argv) {
-  if (argc < 20) {
-    std::cout
-        << "Usage: ./master_vm_daemon <redis_ip> <redis_port> <util-thresh> ";
-    std::cout << "<zone> <key-name> <worker-image> <machine-type-gpu> "
-                 "<machine-type-cpu> ";
-    std::cout << "<startup-script> <security-group> <max-try> <iam-role> "
-                 "<exec-port> ";
-    std::cout << "<exec-prefix> <min-workers> <max-workers> <master-ip> "
-                 "<worker-autoscaler> ";
+  if (argc < 21) {
+    std::cout << "Usage: ./master_vm_daemon <redis_ip> <redis_port> ";
+    std::cout << "<util-thresh> <zone> <key-name> <worker-image> ";
+    std::cout << "<machine-type-gpu> <machine-type-cpu> <startup-script> ";
+    std::cout << "<security-group> <max-try> <iam-role> <exec-port> ";
+    std::cout << "<exec-prefix> <min-workers> <max-cpu-workers> ";
+    std::cout << "<max-gpu-workers> <master-ip> <worker-autoscaler> ";
     std::cout << "<delete-machines>" << std::endl;
     return 1;
   }
@@ -107,10 +107,11 @@ int main(int argc, char** argv) {
   const std::string exec_port = argv[13];
   const std::string exec_prefix = argv[14];
   const int16_t min_workers = std::stoi(argv[15]);
-  const int16_t max_workers = std::stoi(argv[16]);
-  const std::string master_ip = argv[17];
-  const std::string worker_autoscaler = argv[18];
-  const int8_t delete_machines = std::stoi(argv[19]);
+  const int16_t max_cpu_workers = std::stoi(argv[16]);
+  const int16_t max_gpu_workers = std::stoi(argv[17]);
+  const std::string master_ip = argv[18];
+  const std::string worker_autoscaler = argv[19];
+  const int8_t delete_machines = std::stoi(argv[20]);
 
   if (delete_machines == 2) {
     std::cout << "[LOG]: Scaled down machines will be persisted, ";
@@ -121,15 +122,23 @@ int main(int argc, char** argv) {
     std::cout << "[LOG]: Scaled down machines will be stopped" << std::endl;
   }
 
-  std::cout << "[LOG]: The maximum number of machines permitted is "
-            << max_workers << std::endl;
+  std::cout << "[LOG]: Max number of CPU workers: " << max_cpu_workers;
+  std::cout << std::endl;
+  std::cout << "[LOG]: Max number of GPU workers: " << max_gpu_workers;
+  std::cout << std::endl;
 
   RedisMetadata rm_({redis_addr.ip, redis_addr.port});
 
-  // Unset scale flag
+  // Unset VM scale flag
   if (rm_.unset_vm_scale() < 0) {
     std::cerr << "Error resetting VM scale flag!" << std::endl;
     throw std::runtime_error("Error resetting VM scale flag");
+  }
+
+  // Unset slack scale flag
+  if (rm_.unset_slack_scale() < 0) {
+    std::cerr << "Error resetting slack scale flag!" << std::endl;
+    throw std::runtime_error("Error resetting slack scale flag");
   }
 
   // Go through all initial workers and categorize them as being CPU or GPU
@@ -143,9 +152,9 @@ int main(int argc, char** argv) {
       inst_type_map[GPU]++;
     }
   }
-  std::cout << "[LOG]: Starting with " << inst_type_map[CPU]
-            << " CPU-only workers and ";
-  std::cout << inst_type_map[GPU] << " GPU/CPU workers" << std::endl;
+  std::cout << "[LOG]: Starting with " << inst_type_map[CPU];
+  std::cout << " CPU-only workers and " << inst_type_map[GPU];
+  std::cout << " GPU/CPU workers" << std::endl;
 
   int16_t vm_shutdown_counter = 0;
   vm_backoff_counter = num_iter;
@@ -169,7 +178,11 @@ int main(int argc, char** argv) {
 
     // Print number of executors:
     int16_t num_exec = rm_.get_num_executors();
-    std::cout << "[LOG]: There are " << num_exec << " executors" << std::endl;
+    int16_t num_cpu_exec = rm_.get_num_cpu_executors();
+    int16_t num_gpu_exec = num_exec - num_cpu_exec;
+    std::cout << "[LOG]: There are " << num_exec << " executors => ";
+    std::cout << num_cpu_exec << " CPU; " << num_gpu_exec << " GPU";
+    std::cout << std::endl;
 
     // Print per-worker utilization for logging
     std::vector<std::string> all_min_cpu = rm_.min_cpu_util_name(num_exec);
@@ -243,14 +256,21 @@ int main(int argc, char** argv) {
       // Check VM scale flag
       int8_t vm_scale_flag = rm_.vm_scale_status();
 
+      // Check slack scale flag
+      int8_t slack_scale_flag = rm_.slack_scale_status();
+
       std::cout << "[LOG]: Min overall GPU Util: " << gpu_util;
       std::cout << "; Min overall CPU Util: " << cpu_util;
-      std::cout << "; VM Scale Flag: " << (int16_t)vm_scale_flag << std::endl;
+      std::cout << "; VM Scale Flag: " << (int16_t)vm_scale_flag;
+      std::cout << "; Slack Scale Flag: ";
+      std::cout << (int16_t)slack_scale_flag << std::endl;
 
       // Check if machines need to be started
-      if ((num_exec < max_workers) &&
-          ((gpu_util > util_thresh && gpu_util < 100.0) ||
-           (cpu_util > util_thresh) || (vm_scale_flag == 1))) {
+      if ((gpu_util > util_thresh && gpu_util < 100.0 &&
+           (num_gpu_exec < max_gpu_workers)) ||
+          (cpu_util > util_thresh && (num_cpu_exec < max_cpu_workers)) ||
+          (vm_scale_flag == 1 && (num_gpu_exec < max_gpu_workers)) ||
+          (slack_scale_flag == 1 && (num_gpu_exec < max_gpu_workers))) {
         std::cout << "[LOG]: Scaling triggered" << std::endl;
 
         std::string next_worker;
@@ -289,13 +309,24 @@ int main(int argc, char** argv) {
           result += buffer.data();
         }
 
-        // IP addresses are 10 numbers + 3 periods + 1 for 0-indexing
-        std::string exec_ip;
-        if (result.size() == 13) {
-          exec_ip = result;
-        } else {
-          exec_ip = result.substr(result.size() - 14);
+        // Parse IP address out of the returned string
+        std::string exec_ip = "";
+        int8_t num_period = 0;
+        for (int i = (result.size() - 1); i >= 0; --i) {
+          // Skip newline at the very end
+          if (i == (result.size() - 1) && !std::isdigit(result[i])) {
+            continue;
+          }
+
+          // Break if we stop seeing numbers after the third period
+          if (num_period == 3 && !std::isdigit(result[i])) { break; }
+          std::string next_string(1, result[i]);
+          if (next_string == ".") { num_period++; }
+
+          exec_ip = next_string + exec_ip;
         }
+
+        std::cout << "[LOG]: Exec IP: " << exec_ip << std::endl;
 
         if (exec_ip == "FAIL") {
           std::cout << "Worker failed to start" << std::endl;
@@ -316,7 +347,7 @@ int main(int argc, char** argv) {
           std::cout << "[LOG]: Waiting for " << next_worker << " to respond..."
                     << std::endl;
           worker_reply = query_client.Heartbeat();
-          usleep(sleep_seconds);
+          usleep(respond_sleep_seconds);
         }
         std::cout << "[LOG]: Heartbeat received from " << next_worker
                   << std::endl;
@@ -334,9 +365,18 @@ int main(int argc, char** argv) {
         // Mark as CPU only instance if applicable
         if (is_cpuinstance) {
           if (rm_.set_exec_onlycpu(next_worker) == -1) {
-            std::cerr << "Failure to set " << next_worker << " as CPU only!"
-                      << std::endl;
+            std::cerr << "Failure to set " << next_worker << " as CPU only!";
+            std::cerr << std::endl;
             throw std::runtime_error("Failure to set worker as CPU only");
+          }
+        }
+
+        // If slack scale flag was set, set slack flag
+        if (slack_scale_flag) {
+          if (rm_.set_exec_slack(next_worker) == -1) {
+            std::cerr << "Failure to set " << next_worker << " as slack!";
+            std::cerr << std::endl;
+            throw std::runtime_error("Failure to set worker slack");
           }
         }
 
@@ -393,11 +433,12 @@ int main(int argc, char** argv) {
         vm_backoff_counter = 0;
       }
 
-      if (((gpu_util <= gpu_shutdown_min) && (cpu_util <= cpu_shutdown_min)) ||
-          ((avg_gpu_util <= avg_gpu_shutdown_min) &&
-           (avg_cpu_util <= avg_gpu_shutdown_min))) {
-        vm_shutdown_counter++;  // Give a machine vm_shutdown_thresh chances
-                                // before killing it
+      if (!vm_scale_flag &&
+          (((gpu_util <= gpu_shutdown_min) && (cpu_util <= cpu_shutdown_min)) ||
+           ((avg_gpu_util <= avg_gpu_shutdown_min) &&
+            (avg_cpu_util <= avg_cpu_shutdown_min)))) {
+        // Give a machine vm_shutdown_thresh chances before killing it
+        vm_shutdown_counter++;
         if (vm_shutdown_counter == vm_shutdown_thresh) {
           // Check that the min is the same for both CPU and GPU
           std::vector<std::string> min_cpu_name = rm_.min_cpu_util_name(1);
@@ -505,10 +546,15 @@ int main(int argc, char** argv) {
                 << " out of ";
       std::cout << num_iter << std::endl;
       if (vm_backoff_counter == num_iter) {
-        // Unset scale flag
+        // Unset VM scale flag
         if (rm_.unset_vm_scale() < 0) {
           std::cerr << "Error resetting VM scale flag!" << std::endl;
           throw std::runtime_error("Error resetting VM scale flag");
+        }
+        // Unset slack scale flag
+        if (rm_.unset_slack_scale() < 0) {
+          std::cerr << "Error resetting slack scale flag!" << std::endl;
+          throw std::runtime_error("Error resetting slack scale flag");
         }
       }
     }

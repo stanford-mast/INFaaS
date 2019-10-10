@@ -143,13 +143,13 @@ public:
 
     for (int i = 0; i < AUTOSCALER_THREAD_POOL_SIZE; ++i) {
 #ifdef INFAAS_GPU_WORKER
-      autoscalerPool_.push_back(
-          new std::thread(&Autoscaler::GpuAutoscalerDaemon, worker_name_,
-                          std::ref(redis_metadata_), std::ref(s3_client_)));
+      autoscalerPool_.push_back(new std::thread(
+          &Autoscaler::GpuAutoscalerDaemon, worker_name_, autoscaler_type,
+          std::ref(redis_metadata_), std::ref(s3_client_)));
 #endif  // #ifdef INFAAS_GPU_WORKER
-      autoscalerPool_.push_back(
-          new std::thread(&Autoscaler::CpuAutoscalerDaemon, worker_name_,
-                          std::ref(redis_metadata_), std::ref(s3_client_)));
+      autoscalerPool_.push_back(new std::thread(
+          &Autoscaler::CpuAutoscalerDaemon, worker_name_, autoscaler_type,
+          std::ref(redis_metadata_), std::ref(s3_client_)));
       autoscalerPool_.push_back(new std::thread(&Autoscaler::AutoscalerArbiter,
                                                 worker_name_, autoscaler_type,
                                                 std::ref(redis_metadata_)));
@@ -520,7 +520,7 @@ void QueryServiceImpl::qpsMonitor() {
             redis_metadata_->get_parents_variants_on_executor(parent_name,
                                                               worker_name_);
         bool parent_scaledown =
-            false;  // Whether we should force to scale down to CPU.
+            true;  // Whether we should force to scale down to CPU.
         bool has_cpu = false;
         for (auto& model_name : running_modvars) {
           // Calculate qps
@@ -574,7 +574,12 @@ void QueryServiceImpl::qpsMonitor() {
           } else {
             // If there is no request completed within the last second,
             // gradually reduce the latency.
-            curr_avg_lat = curr_avg_lat / 1.5;
+            if (hw == "CPU") {
+              // Decay faster for CPU models.
+              curr_avg_lat = curr_avg_lat / 15;
+            } else {
+              curr_avg_lat = curr_avg_lat / 1.5;
+            }
           }
           model_last_reqs_[model_name] = curr_cnt;
           model_last_batch_[model_name] = curr_batch_cnt;
@@ -588,13 +593,19 @@ void QueryServiceImpl::qpsMonitor() {
                   << "; current batch size: " << curr_avg_batch
                   << "; completed reqs: " << curr_comp_cnt
                   << "; avg latency: " << curr_avg_lat << "msec; curr_avg_slo "
-                  << curr_avg_slo << std::endl;
+                  << curr_avg_slo << "msec; current replicas: " << num_replicas
+                  << std::endl;
           // Log for experiment
           explog << curr_time << ", " << model_name << ", "
                  << curr_qps * (double)num_replicas << ", " << num_replicas
                  << std::endl;
-          auto rs = redis_metadata_->update_model_qps(worker_name_, model_name,
-                                                      curr_qps);
+          // NOTE: we used to have a race condition here: we log the QPS
+          // for 1 replica, but the autoscaler reads QPS and multiply by 2
+          // because the model just got loaded. Then we will read double the
+          // QPS and hence inaccurate. We should directly log the actual QPS
+          // here.
+          auto rs = redis_metadata_->update_model_qps(
+              worker_name_, model_name, curr_qps * (double)num_replicas);
           if (rs < 0) {
             logfile << "[qpsMonitor]Failed to update qps for model: "
                     << model_name << ". Status: " << int(rs) << std::endl;
@@ -614,27 +625,47 @@ void QueryServiceImpl::qpsMonitor() {
           // blacklist. If it became lower than 1.5x of the recorded latency,
           // unset the blacklist. The inf_lat is for the current average batch
           // size. int max_batch =
-
+          // std::stoi(redis_metadata_->get_model_info(model_name,
+          // "max_batch"));
           double slope =
               std::stod(redis_metadata_->get_model_info(model_name, "slope"));
           double intercept = std::stod(
               redis_metadata_->get_model_info(model_name, "intercept"));
           double inf_lat = slope * curr_avg_batch + intercept;
+          logfile << "Theoretical latency: " << inf_lat << std::endl;
           // if ((max_batch >= MAX_ONLINE_BATCH) || (hw == "CPU")) {
           // Blacklist logic is used for both CPU and GPU models.
           // Heuristics for blacklist.
-          double blist_lat_heuristic = 1.5;
+          double blist_lat_heuristic = 2.5;
           double blist_qps_heuristic = 0.5;
+          double blist_queue_heuristic = 0.8;
+          double blist_lat_unset_heuristic = 1.5;
           // Heuristic should be different for GPU.
           if (hw == "GPU") {
-            blist_lat_heuristic = 5;
-            blist_qps_heuristic = 0.03;  // When colocated, it can easily get
-                                         // interfered at low load.
+            // Only change if the latency is small
+            if (inf_lat < 10) {
+              blist_lat_heuristic = std::min(5.0, 15.0 / inf_lat);
+            } else {
+              blist_lat_heuristic = 1.5;
+            }
+            blist_qps_heuristic = 0.3;  // When colocated, it can easily get
+                                        // interfered at low load.
+            blist_queue_heuristic =
+                0.8;  // GPU models can quickly absorb queue.
+            blist_lat_unset_heuristic = 1.25;
           }
+          if ((hw == "CPU") && (num_replicas == 1)) {
+            // Ideally we can load 2 replicas. So set the threshold higher
+            // because this model might be loading.
+            blist_lat_heuristic = 4;
+            blist_qps_heuristic = 1.0;
+            blist_queue_heuristic = 1.1;
+          }
+
           if (((curr_avg_lat > inf_lat * blist_lat_heuristic) &&
                (curr_qps > blist_qps_heuristic * 1000.0 / inf_lat)) ||
               (curr_cnt - curr_comp_cnt >
-               blist_qps_heuristic * 1000.0 / inf_lat)) {
+               blist_queue_heuristic * num_replicas * 1000.0 / inf_lat)) {
             rs = redis_metadata_->set_model_avglat_blacklist(worker_name_,
                                                              model_name);
             if (rs < 0) {
@@ -643,8 +674,10 @@ void QueryServiceImpl::qpsMonitor() {
             }
             has_blacklisted = true;
             logfile << "Blacklisted model: " << model_name << std::endl;
-          } else if (((curr_cnt - curr_comp_cnt) < 1000.0 / inf_lat) &&
-                     curr_avg_lat < inf_lat) {
+          } else if (((curr_cnt - curr_comp_cnt) < blist_queue_heuristic *
+                                                       num_replicas * 1000.0 /
+                                                       inf_lat) &&
+                     curr_avg_lat < inf_lat * blist_lat_unset_heuristic) {
             // The first term makes sure requests will not queue up.
             rs = redis_metadata_->unset_model_avglat_blacklist(worker_name_,
                                                                model_name);
@@ -654,16 +687,19 @@ void QueryServiceImpl::qpsMonitor() {
             }
             logfile << "Unset blacklist model: " << model_name << std::endl;
           }
-          // }
           if (hw == "GPU") {
             // Check whether we need to set parent scaledown: slo is much lower
             // than the inf_latency and the qps is low, and there is no CPU
             // model available.
             // TODO: 0.03 is a heuristic. This logic is wrong because it cannot
             // make sure there is no CPU model.
+            // In case there are multiple GPU models, we should make sure all
+            // of them require parent scaledown.
             if ((curr_avg_slo > 10 * inf_lat) &&
                 (curr_qps < 0.03 * 1000.0 / inf_lat)) {
-              parent_scaledown = true;
+              parent_scaledown = (parent_scaledown & true);
+            } else {
+              parent_scaledown = false;
             }
           }
         }

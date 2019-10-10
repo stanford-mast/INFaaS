@@ -33,13 +33,14 @@
 
 // INFaaS metadata suffixes and set names
 #define VMSCALE_KEY "vmscale"
+#define SLACKSCALE_KEY "slackscale"
+#define CPUEXEC_KEY "numcpuexec"
 #define ALLEXEC_SET "allexecutors"
 #define GMOD_SET "gmod_set"
 #define MODEL_SET "model_set"
 #define MODELVAR_SET "modelvar_set"
 #define CPUUTIL_SET "cpuutil_set"
 #define GPUUTIL_SET "gpuutil_set"
-#define LOADLAT_SET "loadlat"
 #define RUNMODS_SET "allrunning"
 #define CPUEXEC_SUFF "cpuexec"
 #define PTONLY_SUFF "pytorch_only"
@@ -67,6 +68,7 @@
 #define INSTID_SUFF "instid"
 #define BLIST_SUFF "blist"
 #define BLISTMOD_SUFF "blistmod"  // executor_name + model_name + BLISTMOD_SUFF
+#define SLACK_SUFF "slack"
 
 struct Address {
   std::string ip;
@@ -102,6 +104,15 @@ public:
   // Check if an executor is CPU only
   int8_t is_exec_onlycpu(const std::string& executor_name);
 
+  // Designate an executor as being slack for GPU
+  int8_t set_exec_slack(const std::string& executor_name,
+                        const std::string& model_variant = "0");
+
+  // Check if an executor is slack for GPU.
+  // If it is, return the variant running, otherwise return 0.
+  // If it isn't, return NS
+  std::string is_exec_slack(const std::string& executor_name);
+
   // Check if executor exists
   int8_t executor_exists(const std::string& executor_name);
 
@@ -118,14 +129,26 @@ public:
   // Unset VM scale out request
   int8_t unset_vm_scale();
 
-  // Check value of scale out flag
+  // Check value of VM scale out flag
   int8_t vm_scale_status();
+
+  // Set slack scale out request
+  int8_t set_slack_scale();
+
+  // Unset slack scale out request
+  int8_t unset_slack_scale();
+
+  // Check value of slack scale out flag
+  int8_t slack_scale_status();
 
   // Delete executor.
   int8_t delete_executor(const std::string& executor_name);
 
   // Get number of executors
   int16_t get_num_executors();
+
+  // Get number of CPU-only executors
+  int16_t get_num_cpu_executors();
 
   // Get all executors
   std::vector<std::string> get_all_executors();
@@ -245,7 +268,7 @@ public:
   // Get model variant information by name
   // info can be any of the following:
   //// dataset, submitter, framework, comp_size, peak_memory, task, batch_size,
-  ///img_dim, / slope, intercept
+  /// img_dim, / slope, intercept
   std::string get_model_info(const std::string& model_name,
                              const std::string& info);
 

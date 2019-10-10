@@ -42,6 +42,7 @@
 #include <aws/s3/model/ListObjectsV2Request.h>
 #include <aws/s3/model/PutObjectRequest.h>
 
+#include "autoscaler.h"
 #include "common_model_util.h"
 #include "include/base64.h"
 #include "include/constants.h"
@@ -78,6 +79,10 @@ static const int DOCKER_STOP_TIME =
 static const bool CPU_ADAPTIVE_BATCHING = false;
 static const bool OFFLINE_CONTROL =
     true;  // if true, run to avoid interference. Otherwise, run offline anyway.
+
+// If greater than 0, send this number of fake requests to models. Some models
+// will finish initialization during the first few queries.
+static const int WARMUP_QUERIES = 10;
 
 namespace trtis = nvidia::inferenceserver;
 namespace trtisc = nvidia::inferenceserver::client;
@@ -709,6 +714,9 @@ int8_t GpuModelManager::LoadModel(const std::string src_url,
   }
 
   // Copy files for TRT to serve.
+  // TODO: sometimes rsync will cause the model not loaded correctly. Probably
+  // something wrong with the order of copying files. We may eventually use
+  // TRTIS latest model control API instead of manipulating the file system.
   std::string command = "cp -r " + local_file_url + " " + local_trt_model_dir;
   std::cout << command << std::endl;
   if (system(command.c_str()) == -1) {
@@ -738,6 +746,30 @@ int8_t GpuModelManager::LoadModel(const std::string src_url,
         model_to_num_reps_[model_name] = 0;
       }
       return res;
+    }
+  }
+
+  if (WARMUP_QUERIES > 0) {
+    // Send several fake queries to warm up the model. GPU warm up latency
+    // could be very long.
+    std::cout << "Send warm up queries to model: " << model_name << std::endl;
+    int img_dim = std::stoi(rmd->get_model_info(model_name, "img_dim"));
+    // We assume the images will have 3 channels and precision as 4-byte
+    // floats.
+    std::string single_input(img_dim * img_dim * 3 * 4, 'a');
+    QueryOnlineRequest request;
+    request.add_raw_input(single_input);
+
+    QueryOnlineResponse resp;
+
+    for (int i = 0; i < WARMUP_QUERIES; ++i) {
+      res = QueryGeneralModel(model_name, request.raw_input(),
+                              resp.mutable_raw_output());
+      if (res < 0) {
+        std::cout << "Warmup request #" << i << " failed: " << res << std::endl;
+      } else {
+        std::cout << "Warmup request #" << i << " succeeded." << std::endl;
+      }
     }
   }
 
@@ -844,6 +876,8 @@ int8_t GpuModelManager::UnloadModel(const std::string& model_name,
   }
 
   std::cerr << "Successfully unload model " << model_name << std::endl;
+  // Reset average batch size.
+  Autoscaler::setAvgBatch(model_name, 0);
 #endif  // #ifdef INFAAS_GPU_WORKER
   return 0;
 }
@@ -865,6 +899,7 @@ int8_t GpuModelManager::QueryModelOnline(const std::string& model_name,
   //        time3);
 
   int8_t res = 0;
+  // Check with TRTIS to make sure the model is running.
   std::cout << "Getting GPU model state: " << model_name << std::endl;
   auto model_state = GpuModelState(model_name);
   if (model_state == trtis::MODEL_UNAVAILABLE) {
@@ -1308,7 +1343,6 @@ int8_t CpuModelManager::LoadModel(const std::string src_url,
     model_to_names[model_name].push_back(instance_name);
   }
   std::cout << "Model is ready to serve with docker: " << retstr << std::endl;
-
   return 0;
 }
 
@@ -1401,6 +1435,8 @@ int8_t CpuModelManager::UnloadModel(const std::string& model_name,
       std::cerr << "Failed to unset model_load_unload flag for " << model_name
                 << std::endl;
     }
+    // Reset average batch size.
+    Autoscaler::setAvgBatch(model_name, 0);
   }
   return 0;
 }
@@ -1457,7 +1493,7 @@ int8_t CpuModelManager::QueryModelOnline(const std::string& model_name,
 
   // Schedule in a round robin way - get one from the front and push to the
   // back.
-  // TODO: this may need change. We need a way to avoid changing the queue.
+  // TODO: thi may need change. We need a way to avoid changing the queue.
   std::string instance_name;
   {
     std::lock_guard<std::mutex> lock(CpuModelManager::update_mutex_);
@@ -1793,7 +1829,7 @@ int8_t CpuModelManager::QueryImageClassModel(
     const std::string& model_name,
     const google::protobuf::RepeatedPtrField<std::string>& raw_input,
     google::protobuf::RepeatedPtrField<std::string>* raw_output, size_t topk) {
-  // TODO: This function may go deprecated.
+  // TODO: implement the logic.
   return 0;
 }
 
@@ -1803,8 +1839,8 @@ int8_t GpuModelManager::QueryImageClassModel(
     const google::protobuf::RepeatedPtrField<std::string>& raw_input,
     google::protobuf::RepeatedPtrField<std::string>* raw_output, size_t topk) {
 #ifdef INFAAS_GPU_WORKER
-  // TODO: This function may go deprecated
-#endif  // #ifdef INFAAS_GPU_WORKER.
+// TODO: This function may go deprecated
+#endif  // #ifdef INFAAS_GPU_WORKER
   return 0;
 }
 
