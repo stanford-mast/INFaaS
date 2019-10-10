@@ -1493,7 +1493,7 @@ int8_t CpuModelManager::QueryModelOnline(const std::string& model_name,
 
   // Schedule in a round robin way - get one from the front and push to the
   // back.
-  // TODO: thi may need change. We need a way to avoid changing the queue.
+  // TODO: this may need change. We need a way to avoid changing the queue.
   std::string instance_name;
   {
     std::lock_guard<std::mutex> lock(CpuModelManager::update_mutex_);
