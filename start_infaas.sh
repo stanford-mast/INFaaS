@@ -54,7 +54,7 @@ DELETE_MACHINES='2' # 0: VM daemon stops machines; 1: VM daemon deletes machines
 
 ### Values for VMs that don't need user configuration ###
 MIN_WORKERS=$[$NUM_INIT_CPU_WORKERS + $NUM_INIT_GPU_WORKERS] # Used for VM daemon
-EXECUTOR_PREFIX='iwf'
+EXECUTOR_PREFIX='infaas-worker'
 EXECUTOR_PORT='50051'
 STARTUP_SCRIPT='/opt/INFaaS/src/worker/start_worker.sh'
 
