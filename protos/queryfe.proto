@@ -1,0 +1,84 @@
+// Public API for users to submit queries to INFaaS
+
+syntax = "proto3";
+
+package infaaspublic.infaasqueryfe;
+
+import "request_reply.proto";
+
+// Interface exported by INFaaS frontend.
+service Query {
+  // Online query, send input data in the payload
+  rpc QueryOnline(QueryOnlineRequest) returns (QueryOnlineResponse) {}
+
+  // Offline query, input data are stored on the cloud
+  rpc QueryOffline(QueryOfflineRequest) returns (QueryOfflineResponse) {}
+
+  // All parent models with a specific task and dataset
+  rpc AllParentInfo(AllParRequest) returns (AllParResponse) {}
+
+  // Query model information
+  rpc QueryModelInfo(QueryModelInfoRequest) returns (QueryModelInfoResponse) {}
+
+  // Heartbeat
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse) {}
+}
+
+//=================== Message types for queries =============================
+message QuerySLO {
+  int64 LatencyInUSec = 1;  // Latency in micro-seconds.
+  float MinAccuracy = 2;    // Minimum accuracy.
+  float MaxCost = 3;        // Maximum cost in dollar.
+}
+
+message QueryOnlineRequest {
+  repeated bytes raw_input = 1; // Serialized input in bytes.
+  string grandparent_model = 2; // The name of the grandparent model.
+  string parent_model = 3;      // The name of the parent model.
+  string model_variant = 4;     // The name of the specific model variant; not required.
+  QuerySLO slo = 5;             // SLO provided by the user.
+  string submitter = 6;         // User who submitted the request
+}
+
+message QueryOnlineResponse {
+  repeated bytes raw_output = 1;  // Serialized output in bytes.
+  RequestReply status = 2;
+}
+
+message QueryOfflineRequest {
+  string input_url = 1;   // Provide the url of input bucket.
+  string model = 2;       // The name of the parent model.
+  string output_url = 3;  // Provide the url of output bucket.
+  float maxcost = 4;
+  string submitter = 5;
+}
+
+message QueryOfflineResponse {
+  RequestReply status = 1;
+}
+
+message AllParRequest {
+  string task = 1;
+  string dataset = 2;
+}
+
+message AllParResponse {
+  AllParReply reply = 1;
+}
+
+message QueryModelInfoRequest {
+  string model = 1;
+}
+
+message QueryModelInfoResponse {
+  QueryModelReply reply = 1;
+}
+
+message HeartbeatRequest {
+  RequestReply status = 1;
+}
+
+message HeartbeatResponse {
+  RequestReply status = 1;
+}
+

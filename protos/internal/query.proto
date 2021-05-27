@@ -1,0 +1,60 @@
+// For internal communication of queries between the master and workers.
+// Note that some service names/message names may be the same as public APIs,
+// clients are not supposed to directly use them.
+
+syntax = "proto3";
+
+// The namepace for internal communications
+package infaas.internal;
+
+import "infaas_request_status.proto";
+
+// Service provided by the workers that the master can talk to.
+service Query {
+  // Online query, send input data in the payload
+  rpc QueryOnline(QueryOnlineRequest) returns (QueryOnlineResponse) {}
+
+  // Offline query, input data are stored on the cloud
+  rpc QueryOffline(QueryOfflineRequest) returns (QueryOfflineResponse) {}
+
+  // Heartbeat
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse) {}
+}
+
+message QuerySLO {
+  int64 LatencyInUSec = 1;  // Latency in micro-seconds.
+  float MinAccuracy = 2;    // Minimum accuracy.
+  float MaxCost = 3;        // Maximum cost in dollar.
+}
+
+message QueryOnlineRequest {
+  repeated bytes raw_input = 1; // Serialized input in bytes.
+  repeated string model = 2;    // The name of the model(s), support a pool of models.
+  QuerySLO slo = 3;             // SLO provided by the user.
+  string submitter = 4;         // User who submitted the request
+}
+
+message QueryOnlineResponse {
+  repeated bytes raw_output = 1;  // Serialized output in bytes.
+  InfaasRequestStatus status = 2;
+}
+
+message QueryOfflineRequest {
+  string input_url = 1;       // Provide the url of input bucket.
+  repeated string model = 2;  // Support a pool of models.
+  string output_url = 3;      // Provide the url of output bucket.
+  QuerySLO slo = 4;           // SLO provided by the user.
+  string submitter = 5;
+}
+
+message QueryOfflineResponse {
+  InfaasRequestStatus status = 1;
+}
+
+message HeartbeatRequest {
+  InfaasRequestStatus status = 1;
+}
+
+message HeartbeatResponse {
+  InfaasRequestStatus status = 1;
+}

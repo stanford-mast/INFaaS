@@ -1,0 +1,4 @@
+[submodule "thirdparty/aws-sdk-cpp"]
+	path = thirdparty/aws-sdk-cpp
+	url = https://github.com/aws/aws-sdk-cpp.git
+	branch = 1.7.50

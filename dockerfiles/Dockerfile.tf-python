@@ -1,0 +1,31 @@
+# Example tensorflow python inference dockerfile, run on AWS Inferentia.
+
+# To build:
+#   docker build ../ -f Dockerfile.tf-python -t neuron-tf
+
+FROM amazonlinux:2
+
+LABEL name="INFaaS Tensorflow-neuron" \
+      description="Tensorflow-neuron-python Container for INFaaS"
+
+RUN yum install -y python3 python3-devel gcc-c++
+
+WORKDIR /workspace/
+# TBD: clean up inferentia directory. Only copy necessary files
+ADD src/containers/inferentia/ /workspace
+COPY protos/internal/*.py /workspace/
+
+RUN echo $'[neuron] \n\
+name=Neuron YUM Repository \n\
+baseurl=https://yum.repos.neuron.amazonaws.com \n\
+enabled=1' > /etc/yum.repos.d/neuron.repo
+
+RUN rpm --import https://yum.repos.neuron.amazonaws.com/GPG-PUB-KEY-AMAZON-AWS-NEURON.PUB
+
+RUN yum install -y aws-neuron-runtime
+# RUN yum install -y tar gzip
+RUN yum install -y aws-neuron-tools
+RUN python3 -m pip install grpcio protobuf
+RUN python3 -m pip install pillow
+# RUN python3 -m pip install --extra-index-url https://pip.repos.neuron.amazonaws.com neuron-cc
+RUN python3 -m pip install --extra-index-url https://pip.repos.neuron.amazonaws.com tensorflow-neuron
