@@ -16,7 +16,7 @@ INFaaS runs on [AWS](https://aws.amazon.com/) (with other provider platform supp
 ### One-time Setup
 There are a few AWS-specific setup steps, all of which can be accomplished from the AWS dashboard:
 1. Create an IAM Role.
-Go to IAMs -> Roles, and create an EC2 role with policies for `AmazonEC2FullAccess` and `AmazonS3FullAccess`.
+Go to IAMs -> Roles, and create an EC2 role with policies for `AmazonEC2FullAccess`, `AmazonS3FullAccess` and `AdministratorAccess`.
 2. Create a Security Group.
 Go to EC2 -> Security Groups, and allow for all inbound traffic *from your desired trusted IP addresses or domains* and all outbound traffic.
 3. Create an INFaaS Model Repository.
