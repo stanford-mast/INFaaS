@@ -36,8 +36,8 @@ if [[ -d ${HOME}/redox && -f /usr/local/lib64/libredox_static.a ]]; then
   echo "Redox detected"
 else
   echo "Installing Redox"
-  sudo apt update
-  sudo apt install -y cmake build-essential libhiredis-dev libev-dev
+  sudo yum update
+  sudo yum install -y cmake build-essential libhiredis-dev libev-dev
   pushd ${HOME}
   git clone https://github.com/hmartiro/redox.git
   cd redox
@@ -55,5 +55,5 @@ opencv_state="installed"
 pkg-config --modversion opencv | grep -q "was not found" && opencv_state=""
 if [[ -z "${opencv_state}" ]]; then
   echo "Installing OpenCV"
-  sudo apt-get install libopencv-dev
+  sudo yum install libopencv-dev
 fi

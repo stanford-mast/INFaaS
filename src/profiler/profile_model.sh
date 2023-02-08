@@ -173,14 +173,14 @@ fi
 if command -v bc >/dev/null; then
   echo "[LOG]: bc detected"
 else
-  sudo apt -y install bc
+  sudo yum -y install bc
 fi
 
 # Install convert if needed
 if command -v convert >/dev/null; then
   echo "[LOG]: convert detected"
 else
-  sudo apt -y install imagemagick
+  sudo yum -y install imagemagick
 fi
 
 # If task is classification, ask what the dimensions of the input are

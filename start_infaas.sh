@@ -4,7 +4,7 @@ set -ex
 ### General variables ###
 SCRIPT_DIR=$(dirname $(readlink -f $0))
 INFAAS_HOME=${SCRIPT_DIR} # Know relative path
-CMAKE_VERSION='3.7'
+CMAKE_VERSION='3.13'
 LOG_DIR=${INFAAS_HOME}"/logs/master_logs/" # Logging directory for Master
 MASTER_IP=`curl -s http://169.254.169.254/latest/meta-data/local-ipv4` # IP of the machine that runs this script
 
@@ -33,13 +33,13 @@ CPUGPU_UTIL_THRESH=80 # CPU/GPU utilization threshold (out of 100)
 INFERENTIA_UTIL_THRESH=70 # Inferentia utilization threshold (out of 100)
 
 ###### UPDATE THESE VALUES BEFORE RUNNING ######
-REGION='<REGION>'
-ZONE='<ZONE>'
-SECURITY_GROUP='<SECURITYGROUP>'
-IAM_ROLE='<IAMROLE>'
-MODELDB='<MYMODELDB>' # Model repository bucket (do not include s3://)
-CONFIGDB='<MYCONFIGDB>' # Configuration bucket (do not include s3://)
-WORKER_IMAGE='ami-<INFAASAMI>'
+REGION='us-east-1'
+ZONE='d'
+SECURITY_GROUP='INFaaS' # You need to create this security group
+IAM_ROLE='INFaaS_EC2'
+MODELDB='infaas-model-repository-ray' # Model repository bucket (do not include s3://)
+CONFIGDB='infaas-model-configuration-ray' # Configuration bucket (do not include s3://)
+WORKER_IMAGE='ami-0c99408c4fc7f18ac' 
 NUM_INIT_CPU_WORKERS=1
 NUM_INIT_GPU_WORKERS=0
 NUM_INIT_INFERENTIA_WORKERS=0
@@ -52,7 +52,7 @@ MAX_INFERENTIA_WORKERS=0
 SLACK_GPU=0
 KEY_NAME='worker_key'
 MACHINE_TYPE_GPU='p3.2xlarge'
-MACHINE_TYPE_CPU='m5.2xlarge'
+MACHINE_TYPE_CPU='t2.xlarge'
 MACHINE_TYPE_INFERENTIA='inf1.2xlarge'
 DELETE_MACHINES='2' # 0: VM daemon stops machines; 1: VM daemon deletes machines; 2: VM daemon persists machines, but removes them from INFaaS's view
 
@@ -64,19 +64,20 @@ STARTUP_SCRIPT='/opt/INFaaS/src/worker/start_worker.sh'
 
 
 #########Beginning of setup script#########
-
 echo "=============Welcome to INFaaS============="
 echo ""
 echo "Executing setup script"
 
-# Check if user has put in their credentials via aws configure
-if [ ! -f ${HOME}/.aws/credentials ]; then
-  echo "AWS credentials not found! Please put them in by calling: aws configure"
-  exit 1
-fi
+# Install basic dependencies 
+pushd ${INFAAS_HOME}/scripts
+bash setup.sh
+popd
 
 # Checks if 1) cmake is installed and 2) if the right version of cmake is installed
-cmake_installed=`cmake --version 2> /dev/null | grep -q ${CMAKE_VERSION} && echo "installed"`
+cmake_installed=""
+if command -v cmake > /dev/null; then
+  cmake_installed=`cmake --version 2> /dev/null | grep ${CMAKE_VERSION}`
+fi
 if [ -z "$cmake_installed" ]; then
   echo "Installing cmake, version "${CMAKE_VERSION}
   pushd ${INFAAS_HOME}/scripts
@@ -133,7 +134,7 @@ done
 #########Ensure dependencies are installed vor master and metadata store#########
 
 # Check if gRPC cpp is installed
-if command -v grpc_cpp_plugin >/dev/null; then
+if command -v grpc_cpp_plugin > /dev/null; then
   echo "gRPC detected"
 else
   echo "Installing gRPC"
@@ -147,9 +148,24 @@ if [[ -d ${HOME}/redox && -f /usr/local/lib64/libredox_static.a ]]; then
   echo "Redox detected"
 else
   echo "Installing Redox"
-  sudo apt update
-  sudo apt install -y cmake build-essential libhiredis-dev libev-dev
   pushd ${HOME}
+  # Install libhiredis manually
+  wget https://github.com/redis/hiredis/archive/v0.14.0.tar.gz
+  tar -xzvf v0.14.0.tar.gz
+  cd hiredis-0.14.0
+  make
+  sudo make install
+  cd ..
+  rm -rf hiredis-0.14.0 v0.14.0.tar.gz
+  # Install libev manually
+  wget http://dist.schmorp.de/libev/Attic/libev-4.33.tar.gz
+  tar -xzvf libev-4.33.tar.gz
+  cd libev-4.33
+  ./configure
+  make
+  sudo make install
+  cd ..
+  rm -rf libev-4.33 libev-4.33.tar.gz
   git clone https://github.com/hmartiro/redox.git
   cd redox
   mkdir build && cd build
@@ -162,11 +178,35 @@ fi
 export LD_LIBRARY_PATH="/usr/local/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 # Check if OpenCV is installed
-opencv_state="installed"
-pkg-config --modversion opencv | grep -q "was not found" && opencv_state=""
+opencv_state=""
+if pkg-config --modversion opencv | grep -c "2.4"; then
+  opencv_state="installed"
+fi
 if [[ -z "${opencv_state}" ]]; then
   echo "Installing OpenCV"
-  sudo apt-get install libopencv-dev
+  sudo yum install -y libjpeg-turbo-devel libpng-devel libtiff-devel
+  pushd /tmp
+  wget https://github.com/opencv/opencv/archive/2.4.13.7.zip
+  unzip 2.4.13.7.zip
+  cd opencv-2.4.13.7
+  mkdir build
+  cd build
+  cmake -DCMAKE_BUILD_TYPE=Release ..
+  make -j $(nproc)
+  sudo make install
+  popd
+
+  export_statement="export PKG_CONFIG_PATH=\$PKG_CONFIG_PATH:/usr/local/lib/pkgconfig"
+  # Check if the export statement is already present in ~/.bash_profile
+  if grep -Fxq "$export_statement" ~/.bash_profile
+  then
+      echo "Export statement already exists in ~/.bash_profile"
+  else
+      # Append the export statement to /etc/profile
+      echo $export_statement >> ~/.bash_profile
+      echo "Export statement added to ~/.bash_profile"
+      source ~/.bash_profile
+  fi
 else
   echo "OpenCV detected"
 fi
@@ -177,7 +217,7 @@ if [[ -d /usr/local/include/aws ]]; then
 else
   echo "Installing AWS cpp"
   pushd ${INFAAS_HOME}/scripts
-  bash install_aws_cpp_sdk.sh ${INFAAS_HOME}/thirdparty/aws-cpp-sdk
+  bash install_aws_cpp_sdk.sh ${INFAAS_HOME}/thirdparty
   popd
 fi
 
@@ -422,4 +462,3 @@ fi
 echo "INFaaS is all set up!"
 
 exit 0
-

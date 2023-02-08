@@ -6,17 +6,18 @@ set -o pipefail
 
 REDIS_IP="0.0.0.0"
 AUTOSCALER="0"
-if [[ $# -lt 1 ]]; then
-  echo "Usage: ./start_worker.sh <redis-ip> <infaas-bucket> [<autoscaler type>]"
+if [[ $# -lt 2 ]]; then
+  echo "Usage: ./start_worker.sh <redis-ip> <infaas-bucket> <region> [<autoscaler type>]"
   echo "Using default ip: 0.0.0.0"
 else
   REDIS_IP="$1"
 fi
 
 MODELDB="$2"
+REGION="$3"
 
-if [[ $# -ge 3 ]]; then
-  AUTOSCALER="$3"
+if [[ $# -ge 4 ]]; then
+  AUTOSCALER="$4"
 else
   echo "Using default autoscaler: 0 (None)"
 fi
@@ -30,7 +31,7 @@ else
 fi
 echo "HOME directory is: ${HOME}"
 
-REGION='us-west-2'
+
 WORKER_ID=`curl -s http://169.254.169.254/latest/meta-data/instance-id`
 WORKER_NAME=$(aws ec2 describe-tags --region $REGION --filters "Name=resource-id,Values=$WORKER_ID" "Name=key,Values=Name" --output text | cut -f5)
 
@@ -59,10 +60,16 @@ if [[ ! -d ${INFAAS_HOME} ]]; then
   git clone ${INFAAS_URL} ${INFAAS_HOME}
 fi
 
+pushd ${INFAAS_HOME}"/scripts"
+bash install_docker.sh
+popd
+
+# Comment out to speed up worker start time
+# Also for stable worker env.
 # Update docker image
-docker pull qianl15/infaaspytorch:latest
-docker pull nvcr.io/nvidia/tensorrtserver:19.03-py3
-docker pull qianl15/gnmt-infaas:latest
+# sudo docker pull qianl15/infaaspytorch:latest
+# sudo docker pull nvcr.io/nvidia/tensorrtserver:19.03-py3
+# sudo docker pull qianl15/gnmt-infaas:latest
 
 # Check if Redis is installed
 if command -v redis-server >/dev/null; then
@@ -72,7 +79,7 @@ else
   wget http://download.redis.io/redis-stable.tar.gz
   tar xvzf redis-stable.tar.gz
   pushd redis-stable
-  make
+  make -j $(nproc)
   sudo make install
   popd
   rm -rf redis-stable.tar.gz redis-stable
@@ -83,8 +90,8 @@ if [[ -d ${HOME}/redox && -f /usr/local/lib64/libredox_static.a ]]; then
   echo "Redox detected"
 else
   echo "Installing Redox"
-  sudo apt update
-  sudo apt install -y cmake build-essential libhiredis-dev libev-dev
+  sudo yum update
+  sudo yum install -y cmake build-essential libhiredis-dev libev-dev
   pushd ${HOME}
   git clone https://github.com/hmartiro/redox.git
   cd redox
@@ -112,7 +119,7 @@ opencv_state="installed"
 pkg-config --modversion opencv | grep -q "was not found" && opencv_state=""
 if [[ -z "${opencv_state}" ]]; then
   echo "Installing OpenCV"
-  sudo apt-get install libopencv-dev
+  sudo yum install libopencv-dev
 fi
 
 # Wait until redis server is ready

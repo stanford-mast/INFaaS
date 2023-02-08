@@ -2,59 +2,29 @@
 
 # Script to install docker and nvidia-docker(2)
 set -x
-# Delete older version of docker
-sudo apt-get remove docker docker-engine docker.io
 
-sudo apt-get update
-sudo apt-get install \
-    apt-transport-https \
-    ca-certificates \
-    curl \
-    software-properties-common
+sudo yum update -y
 
-# Check OS
-OS=`lsb_release -i -s`
-if [[ $OS == "Debian" ]]; then
-  curl -fsSL https://download.docker.com/linux/debian/gpg | sudo apt-key add -
-	sudo add-apt-repository \
-    "deb [arch=amd64] https://download.docker.com/linux/debian \
-    $(lsb_release -cs) \
-    stable"
+if ! command -v docker &> /dev/null; then
+  sudo amazon-linux-extras install -y docker
+  sudo systemctl --now enable docker
+  # Test your Docker installation
+  # sudo docker run --rm hello-world
 else
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
-  sudo add-apt-repository \
-    "deb [arch=amd64] https://download.docker.com/linux/ubuntu \
-    $(lsb_release -cs) \
-    stable"
+  echo "Docker already installed, skipping installation"
 fi
 
-sudo apt-get update
-
-sudo apt-get install docker-ce
-
 # Install nvidia-docker
-
-# First delete old versions
-docker volume ls -q -f driver=nvidia-docker | xargs -r -I{} -n1 docker ps -q -a -f volume={} | xargs -r docker rm -f
-sudo apt-get purge -y nvidia-docker
-
-# Add package
-curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | \
-       sudo apt-key add -
-
-distribution=$(. /etc/os-release;echo $ID$VERSION_ID)
-
-curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list | \
-       sudo tee /etc/apt/sources.list.d/nvidia-docker.list
-
-sudo apt-get update
-
-# Install
-sudo apt-get install -y nvidia-docker2
-
-sudo pkill -SIGHUP dockerd
-
-# Test...
-nvidia-container-cli --load-kmods info
-docker run --runtime=nvidia --rm nvidia/cuda nvidia-smi
-
+# https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html#installing-on-amazon-linux
+if ! command -v nvidia-container-toolkit &> /dev/null; then
+  distribution=$(. /etc/os-release;echo $ID$VERSION_ID) \
+     && curl -s -L https://nvidia.github.io/libnvidia-container/$distribution/libnvidia-container.repo | sudo tee /etc/yum.repos.d/nvidia-container-toolkit.repo
+  sudo yum clean expire-cache
+  sudo yum install nvidia-container-toolkit
+  sudo nvidia-ctk runtime configure --runtime=docker
+  sudo systemctl restart docker
+  # At this point, a working setup can be tested by running a base CUDA container:
+  # sudo docker run --rm --runtime=nvidia --gpus all nvidia/cuda:11.6.2-base-ubuntu20.04 nvidia-smi
+else
+  echo "Nvidia-container-toolkit already installed, skipping installation"
+fi

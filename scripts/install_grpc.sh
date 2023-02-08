@@ -5,11 +5,11 @@ set -x
 set -e
 
 # Install gRPC Python via pip
-sudo python -m pip install grpcio grpcio-tools
+sudo python3 -m pip install grpcio grpcio-tools
 
 # Install gRPC C++
 BASE_DIR=$HOME/grpc
-sudo apt-get install -y build-essential autoconf libtool pkg-config
+sudo yum install -y build-essential autoconf libtool pkg-config
 
 # Check the latest release version at: https://grpc.io/release
 # In order to be reproducible, we chose v1.16.0

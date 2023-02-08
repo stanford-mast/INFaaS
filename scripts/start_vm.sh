@@ -96,7 +96,7 @@ if [[ "${MASTER_IP}" == "${exec_ip}" ]]; then
   bash /opt/INFaaS/src/worker/stop_worker.sh ${MASTER_IP} \
        > /tmp/stop_worker.log 2>&1 < /dev/null
 else
-  ssh -o StrictHostKeyChecking=no -i ${KEY_FULL} "ubuntu@"${PUBLIC_DNS} \
+  ssh -o StrictHostKeyChecking=no -i ${KEY_FULL} "ec2-user@"${PUBLIC_DNS} \
     -p 22 \
     "bash /opt/INFaaS/src/worker/stop_worker.sh ${MASTER_IP} > /tmp/stop_worker.log 2>&1 < /dev/null"
 fi
@@ -107,9 +107,9 @@ if [[ "${MASTER_IP}" == "${exec_ip}" ]]; then
   bash ${STARTUP_SCRIPT} ${MASTER_IP} ${MODELDB} ${WORKER_AUTOSCALER} \
        > /tmp/start_worker.log 2>&1 < /dev/null &
 else
-  ssh -o StrictHostKeyChecking=no -i ${KEY_FULL} "ubuntu@"${PUBLIC_DNS} \
+  ssh -o StrictHostKeyChecking=no -i ${KEY_FULL} "ec2-user@"${PUBLIC_DNS} \
     -p 22 \
-    "nohup bash ${STARTUP_SCRIPT} ${MASTER_IP} ${MODELDB} ${WORKER_AUTOSCALER} \
+    "nohup bash ${STARTUP_SCRIPT} ${MASTER_IP} ${MODELDB} ${REGION} ${WORKER_AUTOSCALER} \
      > /tmp/start_worker.log 2>&1 < /dev/null &"
 fi
 

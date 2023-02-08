@@ -32,6 +32,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <random>
 
 #include <aws/core/Aws.h>
 #include <aws/s3/S3Client.h>
@@ -68,7 +69,7 @@ inline uint64_t get_curr_timestamp() {
 
 // Compute the duration between two timestamps (in usec), in milliseconds.
 inline double get_duration_ms(const uint64_t& a, const uint64_t& b) {
-  return (double)std::abs(b - a) / 1000.0;
+  return std::abs((double)(b - a)) / 1000.0;
 }
 
 int8_t list_s3_path(const std::string& bucket_name, const std::string& obj_name,

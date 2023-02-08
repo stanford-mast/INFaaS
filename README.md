@@ -16,7 +16,20 @@ INFaaS runs on [AWS](https://aws.amazon.com/) (with other provider platform supp
 ### One-time Setup
 There are a few AWS-specific setup steps, all of which can be accomplished from the AWS dashboard:
 1. Create an IAM Role.
-Go to IAMs -> Roles, and create an EC2 role with policies for `AmazonEC2FullAccess` and `AmazonS3FullAccess`.
+Go to IAMs -> Roles, and create an EC2 role with policies for `AmazonEC2FullAccess`, `AmazonS3FullAccess`, and an inline policy:
+```
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "VisualEditor0",
+            "Effect": "Allow",
+            "Action": "iam:PassRole",
+            "Resource": "arn:aws:iam::231629706961:role/<your-IAM-role-name>"
+        }
+    ]
+}
+```
 2. Create a Security Group.
 Go to EC2 -> Security Groups, and allow for all inbound traffic *from your desired trusted IP addresses or domains* and all outbound traffic.
 3. Create an INFaaS Model Repository.
@@ -32,17 +45,17 @@ INFaaS will need access to this bucket when registering a model.
 In our experiments, we use an `m5.2xlarge` instance.
 We provide a public AMI (ami-036de08e2e59b4abc) in *us-west-2* (that you can [copy to your region](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/CopyingAMIs.html)) that contains the pre-installed dependencies.
 The instance should have the IAM Role and Security Group you created in the [**One-time Setup**](#one-time-setup) attached to it.
-2. If you don't use our AMI (which already has INFaaS's directory set up), clone the INFaaS repository: `git clone https://github.com/stanford-mast/INFaaS.git`.
+2. If you don't use our AMI (which already has INFaaS's directory set up), clone the INFaaS repository: `git clone https://github.com/stanford-mast/INFaaS.git` in `/opt`.
 3. Open `start_infaas.sh` and fill in the following entries. Entries between <> must be filled in prior to using INFaaS; the rest are set to defaults which can be changed based on your desired configuration.
     ```
     ###### UPDATE THESE VALUES BEFORE RUNNING ######
     REGION='<REGION>'
-    ZONE='<ZONE>'
-    SECURITY_GROUP='<SECURITYGROUP>'
-    IAM_ROLE='<IAMROLE>'
+    ZONE='<ZONE>' # Should be a single lower case letter
+    SECURITY_GROUP='<SECURITYGROUP>' # Name (not id) of security group
+    IAM_ROLE='<IAMROLE>' # Name (not id) of IAM role
     MODELDB='<MYMODELDB>' # Model repository bucket (do not include s3://)
     CONFIGDB='<MYCONFIGDB>' # Configuration bucket (do not include s3://)
-    WORKER_IMAGE='ami-<INFAASAMI>'
+    WORKER_IMAGE='ami-<INFAASAMI>' 
     NUM_INIT_CPU_WORKERS=1
     NUM_INIT_GPU_WORKERS=0
     NUM_INIT_INFERENTIA_WORKERS=0
@@ -60,7 +73,8 @@ The instance should have the IAM Role and Security Group you created in the [**O
     ```
     aws s3 sync s3://infaas-sample-public/ s3://your-config-bucket/ --exclude "resnet*"
     ```
-3. Run `./start_infaas.sh` from the INFaaS home directory (i.e., the directory that `start_infaas.sh` is located in).
+3. Run `aws configure`. Hit enter for the first two prompte. (No need to input any IAM user credential.) Then set the default region. 
+4. Run `./start_infaas.sh` from the INFaaS home directory (i.e., the directory that `start_infaas.sh` is located in).
 This will set up all INFaaS components and initial workers, as well as run some basic tests to check that the system is properly set up.
 If a worker fails to start after the timeout period, you can simply rerun the script.
 All executables can be found in `build/bin`.
